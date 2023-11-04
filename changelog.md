@@ -9,7 +9,13 @@ and this project adheres to [Semantic Versioning].
 
 - /
 
-## [0.0.2] - 2023-10-30
+## [0.0.3] - 2023-11-4
+
+### Added
+
+- 增加历史代码 至 cache 文件夹
+
+## [0.0.2] - 2023-11-4
 
 ### Added
 
@@ -17,16 +23,6 @@ and this project adheres to [Semantic Versioning].
 - 增加 busline
 - coord transform: wgs, gcj, bd
 - vis.plot_geodata: 基于 Tilemap 的地图可视化模块
-
-### Changed
-
-### Deprecated
-
-### Removed
-
-### Fixed
-
-### Security
 
 ## [0.0.1] - 2023-10-30
 
