@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning].
 ### Added
 
 - 增加 searchAPI
+- 增加 busline
+- coord transform: wgs, gcj, bd
+- vis.plot_geodata: 基于 Tilemap 的地图可视化模块
 
 ### Changed
 
