@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning].
 
 - /
 
+## [0.0.4] - 2023-11-8
+
+### Added
+
+- subway
+    - 获取地铁城市
+    - 获取某一城市地铁列表
+    - 获取地铁线路详情
+
+- utils
+    - coord_utils: 常用的经纬度字符串解析
+    - memory: 提供缓存
+    - misc.read_json_file
+    - serialization, 持久化存储
+    - vis，geodataframe 调用 TileMap 的可视化
+
 ## [0.0.3] - 2023-11-4
 
 ### Added

@@ -12,6 +12,7 @@ try:
     Satellite = providers.Amap.Satellite
     FLAG = True
 except:
+    Satellite, Normal, Vector = [None] * 3
     FLAG = False
     
 
