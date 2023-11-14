@@ -41,4 +41,4 @@ def create_memory_cache(cachedir='./joblib_cache', verbose=0):
     return memory
 
 
-MEMORY = create_memory_cache('../../cache', verbose=1)
+MEMORY = create_memory_cache('../cache', verbose=1)

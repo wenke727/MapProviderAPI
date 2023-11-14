@@ -2,7 +2,19 @@ import time
 import hashlib
 import pickle
 import os
+import geopandas as gpd
 
+def to_geojson(gdf:gpd.GeoDataFrame, filename:str):
+    if not str(filename).endswith("geojson"):
+        filename = f"{filename}.goojson"
+
+    convert_cols = []
+    for col in gdf.columns:
+        if gdf[col].apply(lambda x: isinstance(x, list)).any():
+            gdf[col] = gdf[col].apply(str)
+            convert_cols.append(col)
+    
+    return gdf.to_file(filename, driver="GeoJSON")
 
 def load_checkpoint(ckpt_file_name, obj=None):
     _dict = {}

@@ -1,4 +1,5 @@
 #%%
+import os
 import time 
 import random
 import requests
@@ -6,15 +7,13 @@ import pandas as pd
 import geopandas as gpd
 from loguru import logger
 from copy import deepcopy
-from shapely import Point, LineString
 
-from utils.vis import plot_geodata
-from coordtransform import gcj_to_wgs
-from utils.coords_utils import check_ll, str_to_point, str
 from utils.memory import MEMORY
+from utils.vis import plot_geodata
+from utils.coords_utils import str_to_point, str_to_linestring
+from utils.serialization import save_checkpoint, load_checkpoint
 
 from cfg import KEY
-
 
 
 @MEMORY.cache
@@ -37,6 +36,7 @@ def get_subway_cities_list(timestamp=None):
         timestamp = int(time.time() * 1000)
     
     url = f"https://map.amap.com/service/subway?_{timestamp}&srhdata=citylist.json"
+    logger.info(url)
     headers = {
         'Cookie': 'connect.sess=s%3Aj%3A%7B%7D.DffclZ%2FN%2BAiqU5kXMjqg3VQHapScLmBFjbTUDpqgPVQ'
     }
@@ -84,7 +84,6 @@ def get_city_subway_lines(city_info, timestamp=None):
         timestamp = int(time.time() * 1000)
     
     url = f"https://map.amap.com/service/subway?_{timestamp}&srhdata={adcode}_drw_{spell}.json"
-    
     headers = {
         'Cookie': 'connect.sess=s%3Aj%3A%7B%7D.DffclZ%2FN%2BAiqU5kXMjqg3VQHapScLmBFjbTUDpqgPVQ'
     }
@@ -105,7 +104,27 @@ def get_city_subway_lines(city_info, timestamp=None):
     except (KeyError, ValueError) as e:
         raise e
 
+    logger.debug(f"{url}\n\tLines: {df.ln.values.tolist()}")
+    
     return df
+
+def get_all_subways_in_China(filename):
+    if os.path.exists(filename):
+        return load_checkpoint(filename)
+    
+    cities = get_subway_cities_list()
+
+    res = {}
+    for i, city in cities.iterrows():
+        lines = get_city_subway_lines(city)
+        res[city['spell']] = {"df": lines, 
+                              "lines": lines['ln'].values.tolist(), 
+                              **city.to_dict()}
+        # time.sleep(random.uniform(2, 8))
+
+    save_checkpoint(res, filename)
+
+    return res
 
 @MEMORY.cache()
 def get_bus_line(keywords, city='0755', output='json', extensions='all', key=None):
@@ -133,18 +152,10 @@ def get_bus_line(keywords, city='0755', output='json', extensions='all', key=Non
 
     Raises
     ------
-    requests.exceptions.HTTPError
-        If the request to the AMap API fails.
-
-    Notes
-    -----
-    - The API Key must be provided by the user.
-    - This function does not handle pagination. For keywords that may return multiple
-      results, it will only retrieve the first page.
-
-    References
-    ----------
-    - API usage: https://www.jianshu.com/p/ef0a31803bc9
+    ValueError
+        If no API key is provided.
+    Exception
+        If the API response has a non-1 status or if any other error occurs.
     """
     if key is None:
         raise ValueError("An AMap API key is required to use this function.")
@@ -158,20 +169,17 @@ def get_bus_line(keywords, city='0755', output='json', extensions='all', key=Non
         'extensions': extensions
     }
     
-    
-    # FIXME: https://www.cnblogs.com/giserliu/p/8251114.html
-    # BaseUrl = "https://ditu.amap.com/service/poiInfo?query_type=TQUERY&pagesize=20&pagenum=1&qii=true&cluster_state=5&need_utd=true&utd_sceneid=1000&div=PC1000&addr_poi_merge=true&is_classify=true&"
-    # params = {
-    #     'keywords':'11路',
-    #     'zoom': '11',
-    #     'city':'610100',
-    #     'geoobj':'107.623|33.696|109.817|34.745'
-    # }
-
     try:
         response = requests.get(api_url, params=params)
-        response.raise_for_status()  
-        return response.json() if output == 'json' else response.text
+        response.raise_for_status()
+
+        if output == 'json':
+            data = response.json()
+            if data['status'] != '1':
+                raise Exception(f"API Error: {data.get('info', 'No info available')} (infocode: {data.get('infocode', 'No infocode')})")
+            return data
+        else:
+            return response.text
     except requests.exceptions.HTTPError as http_err:
         raise SystemError(f"HTTP error occurred: {http_err}") 
     except Exception as err:
@@ -234,31 +242,20 @@ def parse_line_and_stops(json_data, included_line_types: set=None, ll='wgs'):
         coords_str = deepcopy(line.get('polyline', ''))
         del line['polyline']
 
-        # FIXME
-        coords = [tuple(map(float, p.split(','))) for p in coords_str.split(';') if p]
-        if ll == 'wgs':
-            coords = [gcj_to_wgs(*coord) for coord in coords]
-
         line_name = line.get('name', '')
         if included_line_types is not None:
-            if line.get('type') not in included_line_types:
+            if str(line.get('type')) not in included_line_types:
                 continue
         
-        lines.append({**line, 'geometry': LineString(coords)})
+        lines.append({**line, 'geometry': str_to_linestring(coords_str, ll)})
 
         stops = line.get('busstops', [])
         for stop in stops:
             stop_location_str = stop.get('location', '')
-
-            # FIXME
-            stop_location = tuple(map(float, stop_location_str.split(',')))
-            if ll == 'wgs':
-                stop_location = gcj_to_wgs(*stop_location)
-            
             stops_data.append({
                 **stop,
                 'line_name': line_name,
-                'geometry': Point(stop_location)
+                'geometry': str_to_point(stop_location_str, ll)
             })
 
     # Convert to GeoDataFrame
@@ -267,7 +264,7 @@ def parse_line_and_stops(json_data, included_line_types: set=None, ll='wgs'):
 
     return geometry_gdf, stops_gdf
 
-def fetch_and_parse_subway_lines(subway_line_names, citycode, included_line_types, key):
+def fetch_and_parse_subway_lines(subway_line_names, citycode, included_line_types, ll, key):
     """
     For a given citycode, retrieves and parses the subway line geometries and stations,
     then compiles them into GeoDataFrames.
@@ -298,7 +295,7 @@ def fetch_and_parse_subway_lines(subway_line_names, citycode, included_line_type
     
     for _name in subway_line_names:
         line = get_bus_line(_name, citycode, key=key)
-        gdf_geometry, gdf_stops = parse_line_and_stops(line, included_line_types)
+        gdf_geometry, gdf_stops = parse_line_and_stops(line, included_line_types, ll)
         lines.append(gdf_geometry)
         stations.append(gdf_stops)
         # Delay to avoid rate limiting, randomized to mimic non-automated access patterns
@@ -313,18 +310,10 @@ def fetch_and_parse_subway_lines(subway_line_names, citycode, included_line_type
     return gdf_lines, gdf_stations
 
 
+#%%
 if __name__ == "__main__":
-    """ single lines """
-    lines = ['1号线/罗宝线', '坪山云巴1号线', '2号线/8号线', '3号线/龙岗线', '4号线/龙华线', '5号线/环中线', 
-             '6号线/光明线', '6号线支线', '7号线/西丽线', '9号线/梅林线', '10号线/坂田线', '11号线/机场线', 
-             '12号线/南宝线', '14号线/东部快线', '16号线/龙坪线', '20号线']
-    line = lines[15]
-    result = get_bus_line(line, city='0755', key=KEY)
-    geometry_df, stops_df = parse_line_and_stops(result)
-
-    plot_geodata(geometry_df)
-    # geometry_df[['id', 'name', 'geometry']].to_file(f"../data/line_{line_num}.geojson", driver="GeoJSON")
-    # stops_df.to_file(f"../data/line_{line_num}_stops.geojson", driver="GeoJSON")
+    """ China subways """
+    res = get_all_subways_in_China("../data/subway/China_subways.pkl")
 
     """ whole city """
     df_subway_cities = get_subway_cities_list()
@@ -338,6 +327,7 @@ if __name__ == "__main__":
         subway_line_names=lines_list, 
         citycode='4403', 
         included_line_types=set(['地铁']), 
+        ll='wgs',
         key=KEY
     )
 

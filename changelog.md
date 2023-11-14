@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning].
 ## [Unreleased]
 
 - /
+## [0.0.5] - 2023-11-14
+
 
 ## [0.0.4] - 2023-11-8
 

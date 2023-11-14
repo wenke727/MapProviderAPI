@@ -1,7 +1,7 @@
 import numpy as np
 from shapely import Point, LineString
 
-from ..coordtransform import gcj_to_wgs
+from coordtransform import gcj_to_wgs
 
 
 def check_ll(ll):
@@ -18,7 +18,7 @@ def str_to_point(coords_str, ll):
 
     return Point(*stop_location)
 
-def str_to_point(coords_str, ll):
+def str_to_linestring(coords_str, ll):
     check_ll(ll)
     coords = [tuple(map(float, p.split(','))) 
                 for p in coords_str.split(';') if p]
