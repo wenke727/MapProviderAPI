@@ -7,13 +7,20 @@ import pandas as pd
 import geopandas as gpd
 from loguru import logger
 from copy import deepcopy
+from pathlib import Path
 
-from utils.memory import MEMORY
 from utils.vis import plot_geodata
 from utils.coords_utils import str_to_point, str_to_linestring
-from utils.serialization import save_checkpoint, load_checkpoint
+from utils.serialization import save_checkpoint, load_checkpoint, to_geojson
 
 from cfg import KEY
+
+from utils.memory import create_memory_cache
+MEMORY = create_memory_cache(cachedir="/Users/wenke/Documents/Cache")
+
+SPECIAL_CASE = {
+    '大兴国际机场线': ' 北京大兴国际机场线',
+}
 
 
 @MEMORY.cache
@@ -128,35 +135,6 @@ def get_all_subways_in_China(filename):
 
 @MEMORY.cache()
 def get_bus_line(keywords, city='0755', output='json', extensions='all', key=None):
-    """
-    Retrieve bus or subway line information from AMap API.
-
-    Parameters
-    ----------
-    keywords : str
-        The line name to search for. For example, '地铁1号线'.
-    city : str, optional
-        The city code or city name. Default is '0755' for Shenzhen.
-    output : str, optional
-        The format of the output, either 'json' or 'xml'. Default is 'json'.
-    extensions : str, optional
-        The level of detail for the response, either 'base' or 'all'. Default is 'all'.
-    key : str
-        Your AMap API Key. This must be provided for the function to work.
-
-    Returns
-    -------
-    dict or str
-        The response from the AMap API as a dictionary if output is 'json', 
-        otherwise as a raw text string.
-
-    Raises
-    ------
-    ValueError
-        If no API key is provided.
-    Exception
-        If the API response has a non-1 status or if any other error occurs.
-    """
     if key is None:
         raise ValueError("An AMap API key is required to use this function.")
 
@@ -168,6 +146,8 @@ def get_bus_line(keywords, city='0755', output='json', extensions='all', key=Non
         'output': output,
         'extensions': extensions
     }
+    _url = api_url + "?" + "&".join([f"{key}={val}" for key, val in params.items()])
+    logger.debug(_url)
     
     try:
         response = requests.get(api_url, params=params)
@@ -186,51 +166,6 @@ def get_bus_line(keywords, city='0755', output='json', extensions='all', key=Non
         raise SystemError(f"An error occurred: {err}")
 
 def parse_line_and_stops(json_data, included_line_types: set=None, ll='wgs'):
-    """
-    Parses the JSON data from an AMap API response to extract bus line geometries
-    and corresponding bus stops. The geometries and stops are converted into 
-    GeoDataFrames which are suitable for spatial analysis. Optionally filters the 
-    bus lines by type if a set of included line types is provided.
-
-    Parameters
-    ----------
-    json_data : dict
-        The JSON data obtained from the AMap API response.
-    included_line_types : set, optional
-        A set of bus line types to include in the parsing. If provided, only bus lines 
-        whose 'type' matches one of the entries in this set will be included.
-    ll : str, optional
-        The coordinate system to use. Can be 'wgs' for WGS-84 or 'gcj' for GCJ-02. 
-        If 'gcj', a coordinate transformation is applied to convert the coordinates 
-        to WGS-84. Default is 'wgs'.
-
-    Returns
-    -------
-    tuple of (geopandas.GeoDataFrame, geopandas.GeoDataFrame)
-        Returns two GeoDataFrames: one for the geometries of the bus lines and 
-        one for the stops. Each geometry is represented as a LineString, and each 
-        stop is represented as a Point.
-
-    Raises
-    ------
-    ValueError
-        If the 'll' parameter is not one of the accepted values ('wgs', 'gcj').
-    Exception
-        If any error occurs during the parsing of the JSON data or during the 
-        creation of the GeoDataFrames.
-
-    Notes
-    -----
-    The function assumes that the 'polyline' field in the JSON contains the bus line 
-    geometries as a semicolon-separated list of comma-separated longitude and latitude 
-    pairs. The 'busstops' field is assumed to contain a list of stops, each with a 
-    'location' field that provides the longitude and latitude as a comma-separated 
-    string.
-    
-    The filtering of bus lines is based on the 'type' field present in each line's 
-    information within the JSON data. If 'included_line_types' is not None, only lines 
-    with a type present in this set are processed.
-    """
     if ll not in ['wgs', 'gcj']:
         raise ValueError("The 'll' parameter must be either 'wgs' or 'gcj'.")
 
@@ -265,46 +200,34 @@ def parse_line_and_stops(json_data, included_line_types: set=None, ll='wgs'):
     return geometry_gdf, stops_gdf
 
 def fetch_and_parse_subway_lines(subway_line_names, citycode, included_line_types, ll, key):
-    """
-    For a given citycode, retrieves and parses the subway line geometries and stations,
-    then compiles them into GeoDataFrames.
-
-    Parameters
-    ----------
-    subway_line_names : list
-        A list of subway line names for which to fetch and parse the data.
-    citycode : str
-        The code of the city for which to fetch the subway lines.
-    included_line_types : set
-        A set of line types to include in the parsing.
-    key : str
-        API key for the service from which the subway line data is being fetched.
-
-    Returns
-    -------
-    tuple
-        A tuple containing two GeoDataFrames: one for the subway lines and one for the stations.
-
-    Notes
-    -----
-    The function calls 'get_bus_line' to fetch each line's data and 'parse_line_and_stops' to parse it.
-    There is a delay between API calls to avoid rate-limiting issues.
-    """
     lines = []
     stations = []
+    error_lst = []
     
     for _name in subway_line_names:
+        if _name in SPECIAL_CASE:
+            _name = SPECIAL_CASE[_name]
+
         line = get_bus_line(_name, citycode, key=key)
+        if line.get('count', 0) == 0:
+            error_lst.append((citycode, _name))
+            logger.warning(f"Fetching {_name}, {citycode} failed!")
+            continue
+        
         gdf_geometry, gdf_stops = parse_line_and_stops(line, included_line_types, ll)
         lines.append(gdf_geometry)
         stations.append(gdf_stops)
-        # Delay to avoid rate limiting, randomized to mimic non-automated access patterns
-        time.sleep(random.uniform(2, 15))
+        
+        level = 'debug' if len(gdf_geometry) > 0 else 'warning'
+        getattr(logger, level)(f"{_name}: {len(gdf_geometry)} lines, {len(gdf_stops)} stations.")
+        time.sleep(random.uniform(1, 5))
 
     # Combine all the GeoDataFrames and reset index
     gdf_lines = gpd.GeoDataFrame(pd.concat(lines, ignore_index=True))
     gdf_stations = gpd.GeoDataFrame(pd.concat(stations, ignore_index=True))
+    
     # Remove duplicate stations by 'id'
+    gdf_lines.drop_duplicates('id', inplace=True)
     gdf_stations.drop_duplicates('id', inplace=True)
 
     return gdf_lines, gdf_stations
@@ -313,22 +236,27 @@ def fetch_and_parse_subway_lines(subway_line_names, citycode, included_line_type
 #%%
 if __name__ == "__main__":
     """ China subways """
+    ll = 'wgs'
+    save_folder = Path("../data/subway/")
     res = get_all_subways_in_China("../data/subway/China_subways.pkl")
-
-    """ whole city """
-    df_subway_cities = get_subway_cities_list()
-    df_shenzhen_subway = get_city_subway_lines(df_subway_cities.loc[38])
-    logger.info(f"City: {df_subway_cities.cityname.values}")
-
-    lines_list = df_shenzhen_subway.ln.values
-    logger.info(f"Lines: {lines_list}")
-
-    lines, stations = fetch_and_parse_subway_lines(
-        subway_line_names=lines_list, 
-        citycode='4403', 
-        included_line_types=set(['地铁']), 
-        ll='wgs',
-        key=KEY
-    )
+    
+    for city, city_info in res.items():
+        if city != 'nanjing':
+            continue
+        
+        lines = city_info['lines']
+        logger.info(f"City: {city_info['cityname']} / {city_info['spell']} / {city_info['adcode']}\n\tlines: {lines}")
+        
+        df_lines, df_stations = fetch_and_parse_subway_lines(
+            subway_line_names=lines, 
+            citycode=city_info['adcode'], 
+            included_line_types=set(['地铁', '磁悬浮列车']), 
+            ll=ll,
+            key=KEY
+        )
+        
+        to_geojson(df_lines, save_folder / f"{city}_subway_lines_{ll}")
+        to_geojson(df_stations, save_folder / f"{city}_subway_station_{ll}")
+        
 
 # %%
