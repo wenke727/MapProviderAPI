@@ -103,15 +103,6 @@ from loguru import logger
 
 from cfg import KEY
 
-#%%
-df_lines = gpd.read_file('../data/subway/shenzhen_subway_lines_wgs.goojson')
-df_stations = gpd.read_file('../data/subway/shenzhen_subway_station_wgs.goojson')
-
-#%%
-nanshan = df_stations.query("name == '南山'").location
-shangmeilin = df_stations.query("name == '上梅林'").location
-
-#%%
 
 def get_transit_directions(ori, dst, city1, city2, show_fields='cost,navi', multiexport=1, key=KEY):
     """
@@ -134,12 +125,6 @@ def get_transit_directions(ori, dst, city1, city2, show_fields='cost,navi', mult
     response = requests.get(url, params=params)
     return response.text
 
-
-response_text = get_transit_directions(nanshan, shangmeilin, '0755', '0755')
-response_text
-
-# %%
-
 def extract_steps_from_plan(plan):
     steps = []
     seg_id = 0
@@ -158,6 +143,7 @@ def extract_steps_from_plan(plan):
                     line['seg_id'] = seg_id
                     steps.append(line)
 
+            # TODO walking info
             # if 'walking' == key:
             #     walking_info = {
             #         'type': 'Walking',
@@ -203,6 +189,64 @@ def parse_transit_directions(response_text):
 
     return df  # 返回解析后的数据
 
+def get_subway_segment_info(demo_stations):
+    # the sencod and following segments
+    res = []
+    src = demo_stations.iloc[0]
+    for dst in demo_stations.iloc[1:].itertuples():
+        response_text = get_transit_directions(src.location, dst.location, '0755', '0755')
+        plans = parse_transit_directions(response_text)
+        
+        res.append(plans.query("type == '地铁线路'").iloc[[0]])
+
+    plans = pd.concat(res)
+    plans.distance = plans.distance.astype(int)
+    plans.cost = plans.cost.astype(int)
+
+    links = []
+    for i in range(len(plans) - 1):
+        src, dst = plans.iloc[i].arrival_stop, plans.iloc[i + 1].arrival_stop 
+        distance = plans.iloc[i + 1].distance - plans.iloc[i].distance
+        duration = plans.iloc[i + 1].cost - plans.iloc[i].cost
+        
+        links.append({
+            'src': src, 
+            'dst': dst,
+            'distance': distance,
+            'cost': duration,
+        })
+
+    # the fisrt segment
+    response_text = get_transit_directions(
+        demo_stations.iloc[1].location, 
+        demo_stations.iloc[-1].location, 
+        '0755', '0755')
+    plans = parse_transit_directions(response_text)
+    cur = plans.query("type == '地铁线路'").iloc[[0]]
+    prev = res[-1]
+
+    links = [{
+        "src": prev.departure_stop,
+        "dst": prev.arrival_stop,
+        'distance': int(prev.distance) - int(cur.distance),
+        'cost': int(prev.cost) - int(cur.cost)
+    }] + links
+
+    df_links = pd.DataFrame(links)
+
+    return df_links
+
+#%%
+df_lines = gpd.read_file('../data/subway/wgs/shenzhen_subway_lines_wgs.geojson')
+df_stations = gpd.read_file('../data/subway/wgs/shenzhen_subway_station_wgs.geojson')
+
+#%%
+nanshan = df_stations.query("name == '南山'").location
+shangmeilin = df_stations.query("name == '上梅林'").location
+
+response_text = get_transit_directions(nanshan, shangmeilin, '0755', '0755')
+response_text
+
 route = parse_transit_directions(response_text)
 route
 
@@ -214,42 +258,12 @@ route
 line_id = 23
 line = df_lines.loc[line_id]
 demo_stations = pd.json_normalize(json.loads(line.busstops))
-# demo_stations.loc[:, 'sid'] = demo_stations.sequence.apply(
-#     lambda x: f"{line.id}{int(x):03d}")
 demo_stations
 
-# %%
-response_text = get_transit_directions(
-    demo_stations.loc[1].location, 
-    demo_stations.loc[2].location, 
-    '0755', '0755')
-route1 = parse_transit_directions(response_text)
-route1.iloc[[0]]
+#%%
+#! iter items
+links = get_subway_segment_info(demo_stations)
 
 # %%
-response_text = get_transit_directions(
-    demo_stations.loc[2].location, 
-    demo_stations.loc[3].location, 
-    '0755', '0755')
-
-route2 = parse_transit_directions(response_text)
-route2.iloc[[0]]
-
-# %%
-response_text = get_transit_directions(
-    demo_stations.loc[1].location, 
-    demo_stations.loc[3].location, 
-    '0755', '0755')
-
-route3 = parse_transit_directions(response_text)
-route3.iloc[[0]]
-
-# %%
-response_text = get_transit_directions(
-    demo_stations.loc[1].location, 
-    demo_stations.loc[5].location, 
-    '0755', '0755')
-
-route3 = parse_transit_directions(response_text)
-route3.iloc[[0]]
+links
 # %%

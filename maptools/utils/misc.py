@@ -1,8 +1,20 @@
 import sys
 import json
+import platform
 import numpy as np
 import pandas as pd
 
+
+def detect_os():
+    os_name = platform.system()
+    if os_name == "Darwin":
+        return "Mac"
+    elif os_name == "Windows":
+        return "Windows"
+    elif os_name == "Linux":
+        return "Linux"
+    else:
+        return "Unknown OS"
 
 def read_json_file(file_path):
     """

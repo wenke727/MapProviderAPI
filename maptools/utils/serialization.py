@@ -4,9 +4,10 @@ import pickle
 import os
 import geopandas as gpd
 
+
 def to_geojson(gdf:gpd.GeoDataFrame, filename:str):
     if not str(filename).endswith("geojson"):
-        filename = f"{filename}.goojson"
+        filename = f"{filename}.geojson"
 
     convert_cols = []
     for col in gdf.columns:
@@ -27,7 +28,6 @@ def load_checkpoint(ckpt_file_name, obj=None):
     
     return _dict
     
-
 def save_checkpoint(obj, ckpt_file_name, ignore_att=[]):
     def _save(tmp):
         with open(ckpt_file_name, 'wb') as f:
