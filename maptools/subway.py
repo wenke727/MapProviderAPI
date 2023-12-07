@@ -226,7 +226,7 @@ def fetch_and_parse_subway_lines(subway_line_names, citycode, included_line_type
     for _name in subway_line_names:
         if (citycode, _name) in SPECIAL_CASE:
             _name = SPECIAL_CASE[(citycode, _name)]
-        if (citycode, _name) in SPECIAL_CASE:
+        if (citycode, _name) in BAD_CASE:
             logger.warning(f"Skip {citycode} {_name} due to lack of data.")
             continue
 

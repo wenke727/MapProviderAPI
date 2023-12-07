@@ -1,108 +1,29 @@
 #%%
 """
 WBS:
-    - API 获取数据
-    - API 数据解析
+    x API 获取数据
+    x API 数据解析
     - 遍历策略 
     - 数据处理方面
         - station -> line mapping
 """
 
-walking = {
-        "destination": "114.028694,22.535616",
-        "distance": "297",
-        "origin": "114.025826,22.536245",
-        "cost": {
-            "duration": "254"
-        },
-        "steps": [
-            {
-                "instruction": "步行400米到达车公庙",
-                "road": "",
-                "distance": "400",
-                "navi": {
-                    "action": "",
-                    "assistant_action": "到达车公庙",
-                    "walk_type": "5"
-                }
-            }
-        ]
-    }
-
-bus = {
-        "buslines": [
-            {
-                "departure_stop": {
-                    "name": "车公庙",
-                    "id": "440300024055003",
-                    "location": "114.028702,22.535615"
-                },
-                "arrival_stop": {
-                    "name": "上梅林",
-                    "id": "440300024055009",
-                    "location": "114.060432,22.568440",
-                    "exit": {
-                        "name": "C口",
-                        "location": "114.059319,22.570120"
-                    }
-                },
-                "name": "地铁9号线(梅林线)(前湾--文锦)",
-                "id": "440300024055",
-                "type": "地铁线路",
-                "distance": "7151",
-                "cost": {
-                    "duration": "947"
-                },
-                "bus_time_tips": "可能错过末班车",
-                "bustimetag": "4",
-                "start_time": "",
-                "end_time": "",
-                "via_num": "5",
-                "via_stops": [
-                    {
-                        "name": "香梅",
-                        "id": "440300024055004",
-                        "location": "114.039625,22.545491"
-                    },
-                    {
-                        "name": "景田",
-                        "id": "440300024055005",
-                        "location": "114.043343,22.553419"
-                    },
-                    {
-                        "name": "梅景",
-                        "id": "440300024055023",
-                        "location": "114.037934,22.561028"
-                    },
-                    {
-                        "name": "下梅林",
-                        "id": "440300024055024",
-                        "location": "114.041768,22.565672"
-                    },
-                    {
-                        "name": "梅村",
-                        "id": "440300024055025",
-                        "location": "114.052423,22.568443"
-                    }
-                ]
-            }
-        ]
-    }
-segment = {
-    "walking": walking,
-    "bus": bus
-}
 
 #%%
 import json
 import requests
 import numpy as np
 import pandas as pd
+import networkx as nx
 import geopandas as gpd
 from copy import deepcopy
 from loguru import logger
+from itertools import islice
 
 from cfg import KEY
+
+from utils.logger import make_logger
+logger = make_logger('../cache', 'network')
 
 
 def get_transit_directions(ori, dst, city1, city2, show_fields='cost,navi', multiexport=1, key=KEY):
@@ -152,7 +73,7 @@ def extract_steps_from_plan(plan):
 
 def parse_transit_directions(response_text):
     data = json.loads(response_text)
-    logger.debug(f"Status: {data.get('status')}, Info: {data.get('info')}, Total Routes: {data.get('count')}")
+    # logger.debug(f"Status: {data.get('status')}, Info: {data.get('info')}, Total Routes: {data.get('count')}")
     df = pd.DataFrame()
     
     if 'route' in data:
@@ -181,42 +102,35 @@ def parse_transit_directions(response_text):
 
 def get_subway_segment_info(demo_stations):
     # the sencod and following segments
-    res = []
+    links = []
+    directions_res = []
+    
     src = demo_stations.iloc[0]
     for dst in demo_stations.iloc[1:].itertuples():
+        logger.info(f"{src['name']} -> {dst.name}")
         response_text = get_transit_directions(src.location, dst.location, '0755', '0755')
         plans = parse_transit_directions(response_text)
-        
-        res.append(plans.query("type == '地铁线路'").iloc[[0]])
+        directions_res.append(plans.query("type == '地铁线路'").iloc[[0]])
 
-    plans = pd.concat(res)
-    plans.distance = plans.distance.astype(int)
-    plans.cost = plans.cost.astype(int)
-
-    links = []
-    for i in range(len(plans) - 1):
-        src, dst = plans.iloc[i].arrival_stop, plans.iloc[i + 1].arrival_stop 
-        distance = plans.iloc[i + 1].distance - plans.iloc[i].distance
-        duration = plans.iloc[i + 1].cost - plans.iloc[i].cost
-        
+    # TODO 查看顺序
+    for i in range(len(directions_res) - 1):
+        cur = directions_res[i].iloc[0]
+        nxt = directions_res[i + 1].iloc[0]
         links.append({
-            'src': src, 
-            'dst': dst,
-            'distance': distance,
-            'cost': duration,
+            'src': cur.arrival_stop, 
+            'dst': nxt.arrival_stop ,
+            'distance': int(nxt.distance) - int(cur.distance),
+            'cost': int(nxt.cost) - int(cur.cost),
         })
 
     # the fisrt segment
-    response_text = get_transit_directions(
-        demo_stations.iloc[1].location, 
-        demo_stations.iloc[-1].location, 
-        '0755', '0755')
+    src, dst = demo_stations.iloc[1].location, demo_stations.iloc[-1].location
+    response_text = get_transit_directions(src, dst, '0755', '0755')
     plans = parse_transit_directions(response_text)
-    plans = plans.query("type == '地铁线路'")
-    cur = plans.iloc[0]
-    prev = res[-1].iloc[0]
-    res.append(plans.query("type == '地铁线路'").iloc[[0]])
+    directions_res.append(plans.query("type == '地铁线路'").iloc[[0]])
 
+    cur = directions_res[-1].iloc[0]
+    prev = directions_res[-2].iloc[0]
     links = [{
         "src": prev.departure_stop,
         "dst": cur.departure_stop,
@@ -225,8 +139,13 @@ def get_subway_segment_info(demo_stations):
     }] + links
 
     df_links = pd.DataFrame(links)
+    nodes = np.concatenate([df_links.src.values, df_links.iloc[[-1]].dst.values])
+    nodes = pd.json_normalize(nodes).set_index('id')
+    
+    df_links.src = df_links.src.apply(lambda x: x['id'])
+    df_links.dst = df_links.dst.apply(lambda x: x['id'])
 
-    return df_links
+    return nodes, df_links, directions_res
 
 def get_subway_interval():
     # TODO 获取地铁的发车时间间隔
@@ -236,40 +155,6 @@ def extract_exchange_data():
     # TODO 提取换乘的信息
     pass
 
-#%%
-df_lines = gpd.read_file('../data/subway/wgs/shenzhen_subway_lines_wgs.geojson')
-df_stations = gpd.read_file('../data/subway/wgs/shenzhen_subway_station_wgs.geojson')
-
-#%%
-nanshan = df_stations.query("name == '南山'").location
-shangmeilin = df_stations.query("name == '上梅林'").location
-
-response_text = get_transit_directions(nanshan, shangmeilin, '0755', '0755')
-response_text
-
-commute = parse_transit_directions(response_text)
-commute
-
-# %%
-""" 
-初步结论：
-1. 候车时间设定比较随意，2 min, 3 min
-"""
-line_id = 22
-line = df_lines.loc[line_id]
-demo_stations = pd.json_normalize(json.loads(line.busstops))
-demo_stations
-
-#%%
-#! iter items
-df_links = get_subway_segment_info(demo_stations)
-df_links
-
-# TODO df_lniks 里的节点信息拆分开来 和 demo_stations 合并
-
-# %%
-import networkx as nx
-from itertools import islice
 
 class MetroNetwork:
     def __init__(self):
@@ -278,8 +163,16 @@ class MetroNetwork:
     def add_node(self, id, *args, **kwargs):
         self.graph.add_node(id, *args, **kwargs)
 
+    def add_nodes(self, nodes:pd.DataFrame):
+        for id, node in zip(nodes.index, nodes.to_dict(orient='records')):
+            self.add_node(id, **node)
+
     def add_edge(self, src, dst, distance=0, duration=0, *args, **kwargs):
         self.graph.add_edge(src, dst, distance=distance, duration=duration, *args, **kwargs)
+
+    def add_edges(self, edges:pd.DataFrame):
+        for link in edges.itertuples():
+            self.add_edge(link.src, link.dst, distance=link.distance, duration=link.cost)
 
     def shortest_path(self, source, target, weight='distance'):
         try:
@@ -303,20 +196,40 @@ class MetroNetwork:
 
 metro = MetroNetwork()
 
-nodes = np.concatenate([df_links.src.values, df_links.iloc[[-1]].dst.values])
-for node in nodes:
-    metro.add_node(**node)
-
-for link in df_links.itertuples():
-    metro.add_edge(link.src['id'], link.dst['id'], distance=link.distance, duration=link.cost)
-
-metro.graph
-
-# print(metro.shortest_path("A", "C", weight='duration'))  # 根据持续时间查找最短路径
-# print(metro.top_k_paths("A", "C", 2, weight='distance'))  # 查找两点间距离最短的前两条路径
 #%%
-nodes_df = pd.DataFrame.from_dict(dict(metro.graph.nodes(data=True)), orient='index')
-nodes_df
+df_lines = gpd.read_file('../data/subway/wgs/shenzhen_subway_lines_wgs.geojson')
+df_stations = gpd.read_file('../data/subway/wgs/shenzhen_subway_station_wgs.geojson')
+
+#%%
+nanshan = df_stations.query("name == '南山'").location
+shangmeilin = df_stations.query("name == '上梅林'").location
+
+response_text = get_transit_directions(nanshan, shangmeilin, '0755', '0755')
+response_text
+
+commute = parse_transit_directions(response_text)
+commute
+
+# %%
+""" 
+初步结论：
+    1. 候车时间设定比较随意，2 min, 3 min
+"""
+
+for line_id in [24]:
+    line = df_lines.loc[line_id]
+    demo_stations = pd.json_normalize(json.loads(line.busstops))
+    nodes, edges, directions_res = get_subway_segment_info(demo_stations)
+
+    metro.add_nodes(nodes)
+    metro.add_edges(edges)
+
+#%%
+metro.nodes_to_dataframe()
+
+#%%
+nodes.merge(demo_stations.rename(columns={'id': 'bid', 'location': 'station_coord'}), on='name', how='left')
+
 
 # %%
 
@@ -347,4 +260,5 @@ for link in links:
 
 # %%
 metro.edges_to_dataframe()
+
 # %%
