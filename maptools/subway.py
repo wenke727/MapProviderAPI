@@ -9,15 +9,17 @@ import geopandas as gpd
 from loguru import logger
 from copy import deepcopy
 from pathlib import Path
+
 from utils.vis import plot_geodata
 from utils.misc import read_json_file
 from utils.logger import make_logger
 from utils.serialization import save_checkpoint, load_checkpoint, to_geojson
 from utils.coords_utils import str_to_point, xyxy_str_to_linestring, xsys_str_to_linestring
 from cfg import KEY, MEMORY, LL_SYS
+
 logger = make_logger('../cache', 'subway')
 
-# TODO add citycode
+
 SPECIAL_CASE = {
     ('1100', '大兴国际机场线'): '北京大兴国际机场线',
     ('3201', "S6号线"): "南京S6号线",
@@ -218,7 +220,7 @@ def parse_line_and_stops(json_data, included_line_types: set=None, ll='wgs'):
 
     return geometry_gdf, stops_gdf
 
-def fetch_and_parse_subway_lines(subway_line_names, citycode, included_line_types, ll, key):
+def fetch_and_parse_subway_lines(subway_line_names, cityname, citycode, included_line_types, ll, key):
     lines = []
     stations = []
     error_lst = []
@@ -238,9 +240,8 @@ def fetch_and_parse_subway_lines(subway_line_names, citycode, included_line_type
             stations.append(gdf_stops)
         
         level = 'debug' if len(gdf_geometry) > 0 else 'error'
-        getattr(logger, level)(
-            f"{citycode} {_name}: {len(gdf_geometry)} lines, {len(gdf_stops)} stations.")
-        time.sleep(random.uniform(1, 5))
+        getattr(logger, level)(f"{cityname}({citycode}), {_name}")
+        time.sleep(random.uniform(1, 3))
 
     if len(lines) == 0:
         logger.warning(f"Check city {citycode}, for there is no subway lines.")
@@ -258,33 +259,31 @@ def fetch_and_parse_subway_lines(subway_line_names, citycode, included_line_type
     return gdf_lines, gdf_stations
 
 def parse_amap_web_search_response(fn, ll='wgs'):
+    """_summary_
+
+    Args:
+        fn (function): _description_
+        ll (str, optional): _description_. Defaults to 'wgs'.
+
+    Returns:
+        _type_: _description_
+    Refs:
+        - https://www.amap.com/search?query=屯马线&city=810000&geoobj=114.06381%7C22.304433%7C114.158902%7C22.452082&zoom=12.79
+    """
     data = read_json_file(fn)
 
     # lines
-    lines = data.get('busMoreData', {}).get("busline_list", [])
+    lines = data.get('data', {}).get("busline_list", [])
     df_lines = pd.DataFrame(lines)
     geoms = df_lines.apply(lambda x: xsys_str_to_linestring(x['xs'], x['ys'], ll), axis=1)
     df_lines = gpd.GeoDataFrame(df_lines, geometry=geoms, crs=4326)
-
-    # stations
-    stops = df_lines['via_stops'].explode()
-    df_stations = pd.json_normalize(stops)
-
-    df_stations.loc[:, 'location'] = df_stations.apply(lambda x: f"{x['location.lng']:.6f},{x['location.lat']:.6f}",axis=1)
-    df_stations.loc[:, 'order'] = stops.index
-    geoms = df_stations.location.apply(lambda x: str_to_point(x, ll))
-    df_stations = gpd.GeoDataFrame(
-        df_stations,
-        geometry=geoms
-    )
        
-    # post process for `lines`
     line_rename_dict = {
         'name': 'name',
         'code': 'citycode',
         'front_name': 'start_stop',
         'terminal_name': 'end_stop',
-        'via_stops': 'busstops',
+        'stations': 'busstops',
     }
     
     _df_lines = df_lines.copy()
@@ -294,8 +293,18 @@ def parse_amap_web_search_response(fn, ll='wgs'):
     df_lines.loc[:, 'status'] = 1 # FIXME 这里没有对应的字段
     df_lines = gpd.GeoDataFrame(df_lines, geometry=_df_lines.geometry)
 
-    # update `busstops`
-    busstops = df_stations[['id', 'name', 'sequence', 'location']].fillna('').to_dict(orient='records')
+    # stations
+    stops = df_lines['busstops'].explode()
+    df_stations = pd.json_normalize(stops)
+
+    df_stations.loc[:, 'location'] = df_stations.xy_coords.apply(lambda x: x.replace(";", ','))
+    df_stations.loc[:, 'order'] = stops.index
+    df_stations.loc[:, 'id'] = df_stations.station_id
+    df_stations.loc[:, 'sequence'] = range(len(df_stations))
+    geoms = df_stations.location.apply(lambda x: str_to_point(x, ll))
+    df_stations = gpd.GeoDataFrame(df_stations, geometry=geoms)
+    
+    busstops = df_stations[['id', 'name', 'location']].fillna('').to_dict(orient='records')
     busstops_lst = [[busstops[0]]]
     prev_idx = df_stations.iloc[0].order
 
@@ -312,55 +321,58 @@ def parse_amap_web_search_response(fn, ll='wgs'):
 
     return df_lines, df_stations
 
-def pipeline_subway_data(folder="../data/subway/"):
+def pipeline_subway_data(folder="../data/subway/", round=1):
     folder = Path(folder)
     df_lines = get_all_subways_in_China(folder / "China_subways.pkl")
+    citycode_2_cityname = {val['adcode']: key for key, val in df_lines.items()}
     
     COUNT = 0
-    for city, city_info in df_lines.items():
-        # COUNT += 1
-        # if COUNT < 32:
-        #     continue
-        # if city != 'shenzhen':
-        #     continue
+    if round == 1:
+        for cityname, city_info in df_lines.items():
+            lines = city_info['lines']
+            logger.info(f"City: [{city_info['cityname']}, {city_info['spell']}, "
+                        f"{city_info['adcode']}], Lines: {lines}")
+            
+            df_lines, df_stations = fetch_and_parse_subway_lines(
+                subway_line_names=lines, 
+                cityname=city_info['cityname'],
+                citycode=city_info['adcode'], 
+                included_line_types=set(['地铁', '磁悬浮列车']), 
+                ll=LL_SYS,
+                key=KEY
+            )
+            
+            if not df_lines.empty:
+                to_geojson(df_lines, folder / LL_SYS / f"{cityname}_subway_lines_{LL_SYS}")
+            if not df_stations.empty:
+                to_geojson(df_stations, folder / LL_SYS / f"{cityname}_subway_station_{LL_SYS}")
+        return True
+    elif round == 2:
+        for dirpath, dirnames, filenames in os.walk(folder / 'bad_cases'):
+            for file_name in filenames:
+                if 'json' not in file_name:
+                    continue
+                
+                citycode, line_name = file_name.replace('.json', '').split('_')
+                cityname = citycode_2_cityname[citycode]
+                json_fn = os.path.join(dirpath, file_name)
+                df_lines, df_stations =  parse_amap_web_search_response(json_fn)
+                
+                line_fn = folder / LL_SYS / f"{cityname}_subway_lines_{LL_SYS}.geojson"
+                if not os.path.exists(line_fn):
+                    to_geojson(df_lines, line_fn)
+                    continue
+                
+                ori_gdf = gpd.read_file(line_fn)
+                gdf = gpd.GeoDataFrame(pd.concat([ori_gdf, df_lines]), crs=4326)
+                to_geojson(gdf, line_fn)
         
-        lines = city_info['lines']
-        logger.info(f"City: [{city_info['cityname']}, {city_info['spell']}, "
-                    f"{city_info['adcode']}], Lines: {lines}")
-        
-        df_lines, df_stations = fetch_and_parse_subway_lines(
-            subway_line_names=lines, 
-            citycode=city_info['adcode'], 
-            included_line_types=set(['地铁', '磁悬浮列车']), 
-            ll=LL_SYS,
-            key=KEY
-        )
-        
-        if not df_lines.empty:
-            to_geojson(df_lines, folder / LL_SYS / f"{city}_subway_lines_{LL_SYS}")
-        if not df_stations.empty:
-            to_geojson(df_stations, folder / LL_SYS / f"{city}_subway_station_{LL_SYS}")
-
+        return True
+    
+    return False
 
 
 #%%
 if __name__ == "__main__":
-    pipeline_subway_data()
-    
-    # df_lines, df_stations = fetch_and_parse_subway_lines(
-    #     subway_line_names=['10号线'], 
-    #     citycode="3201", 
-    #     included_line_types=set(['地铁', '磁悬浮列车']), 
-    #     ll=LL_SYS,
-    #     key=KEY
-    # )
-
-# %%
-""" 补充特殊的线路 """
-# fn = "../data/subway/bad_cases/宁滁线.json"
-# df_lines, df_stations = parse_amap_web_search_response(fn, LL_SYS)
-# df_lines
-# to_geojson(df_lines, 'test_lines')
-# to_geojson(df_stations, 'test_stations')
-
-# %%
+    pipeline_subway_data(folder="../data/subway/", round=1)
+    pipeline_subway_data(folder="../data/subway/", round=2)
