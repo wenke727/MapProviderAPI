@@ -51,6 +51,29 @@ def __route_formatter():
 
     logger.debug("".join(instructions))
 
+def __get_exchange_info():
+    #! 增加换乘的记录
+    route_0 = query_dataframe(routes, 'route', 0)
+    subways = route_0.iloc[::2]
+    walkings = route_0.iloc[1::2]
+
+    cond = (subways['type'] == '地铁线路').all() and \
+        (walkings['type'] == '步行').all() and \
+        len(subways) - 1 == len(walkings)
+
+    links = []
+    for i in range(walkings.shape[0]):
+        links.append({
+            'src': subways.iloc[i].arrival_stop['id'],
+            'dst': subways.iloc[i + 1].departure_stop['id'],
+            'distance': walkings.iloc[i].distance,
+            'duration': walkings.iloc[i].cost,
+            'type': '步行',
+            'steps': walkings.iloc[i].steps,
+        })
+    for link in links:
+        metro.add_edge(**link)
+
 """ 辅助函数 """
 def _split_line_name(series):
     """
@@ -74,12 +97,10 @@ def _load_subway_lines(line_fn):
     
     return df_lines
 
-def _extract_stations_from_lines(df_lines):
+def _extract_stations_from_lines(df_lines, keep_attrs = ['line_id', 'line_name']):
     stations = df_lines.busstops.apply(eval).explode()
     df_stations = pd.json_normalize(stations)
     df_stations.index = stations.index
-
-    keep_attrs = ['line_id', 'line_name']
 
     df_stations = df_stations.merge(
         df_lines[keep_attrs], 
@@ -339,6 +360,27 @@ def check_shortest_path():
     routes = metro.top_k_paths(src, dst, 3, weight='cost')
     nodes.loc[routes[0]]
 
+def get_exchange_link_info(nodes, station_name):
+    #! 如何获取一个换乘站的所有连接
+    nidxs = np.sort(query_dataframe(nodes, 'name', station_name).index)
+    logger.debug(f"{station_name}: {nidxs}")
+
+    lst = []
+    for nid in nidxs:
+        lst.append(metro.get_adj_nodes(nid))
+    points = pd.DataFrame(lst)
+    points.loc[:, 'prev'] = points['prev'].apply(lambda x: x[0] if isinstance(x, list) else x)
+    points.loc[:, 'next'] = points['next'].apply(lambda x: x[0] if isinstance(x, list) else x)
+    points.loc[:, 'line_name'] = points['cur'].apply(lambda x: nodes.loc[x].line_name)
+
+    for i, src in enumerate(points.itertuples()):
+        for j, dst in enumerate(points.itertuples()):
+            if i == j or src.line_name == dst.line_name:
+                continue
+
+            start = nodes.loc[src.prev]
+            end = nodes.loc[dst.next]
+            logger.debug(f"{start['name']} -> {end['name']}")
 
 if __name__ == "__main__":
     line_fn = '../data/subway/wgs/shenzhen_subway_lines_wgs.geojson'
@@ -371,59 +413,12 @@ if __name__ == "__main__":
 
 
 #%%
-
-def get_exchange_link_info(nodes, station_name):
-    #! 如何获取一个换乘站的所有连接
-    nidxs = np.sort(query_dataframe(nodes, 'name', station_name).index)
-    logger.debug(f"{station_name}: {nidxs}")
-
-    lst = []
-    for nid in nidxs:
-        lst.append(metro.get_adj_nodes(nid))
-    points = pd.DataFrame(lst)
-    points.loc[:, 'prev'] = points['prev'].apply(lambda x: x[0] if isinstance(x, list) else x)
-    points.loc[:, 'next'] = points['next'].apply(lambda x: x[0] if isinstance(x, list) else x)
-    points.loc[:, 'line_name'] = points['cur'].apply(lambda x: nodes.loc[x].line_name)
-
-    for i, src in enumerate(points.itertuples()):
-        for j, dst in enumerate(points.itertuples()):
-            if i == j or src.line_name == dst.line_name:
-                continue
-
-            start = nodes.loc[src.prev]
-            end = nodes.loc[dst.next]
-            logger.debug(f"{start['name']} -> {end['name']}")
-
 station_name = '南山'
-nodes = metro.nodes_to_dataframe()
 get_exchange_link_info(nodes, station_name)
 
 
 #%%
-def get_exchange_info():
-    #! 增加换乘的记录
-    route_0 = query_dataframe(routes, 'route', 0)
-    subways = route_0.iloc[::2]
-    walkings = route_0.iloc[1::2]
-
-    cond = (subways['type'] == '地铁线路').all() and \
-        (walkings['type'] == '步行').all() and \
-        len(subways) - 1 == len(walkings)
-
-    links = []
-    for i in range(walkings.shape[0]):
-        links.append({
-            'src': subways.iloc[i].arrival_stop['id'],
-            'dst': subways.iloc[i + 1].departure_stop['id'],
-            'distance': walkings.iloc[i].distance,
-            'duration': walkings.iloc[i].cost,
-            'type': '步行',
-            'steps': walkings.iloc[i].steps,
-        })
-    for link in links:
-        metro.add_edge(**link)
-
-#%%
+" query -> parse -> filter -> result "
 """
 #! 重新梳理流程
 # TODO
@@ -432,12 +427,12 @@ def get_exchange_info():
     - 校核起点和终点是否一致；
 """
 
-# src, dst = '后海', '南光'
+src, dst = '后海', '南光'
 src, dst = '南山', '上梅林'
 # src, dst = '左炮台东', '福永'
 
 strategy = 0
-route_type = "地铁线路"
+mode = "地铁线路"
 start = df_stations.query(f"name == '{src}'")
 end = df_stations.query(f"name == '{dst}'")
 
@@ -445,28 +440,32 @@ response_data = query_transit_directions(start.location, end.location, '0755', '
 
 #%%
 
-def parse_transit_directions(data, route_type='地铁线路'):
+def parse_transit_directions(data, inshort=True, mode='地铁线路', verbose=True):
     def _extract_steps_from_plan(route, route_id):
         steps = []
         for seg_id, segment in enumerate(route['segments']):
             connector = 'walking_0'
-            step = {"seg_id": seg_id, 'sub_seg': ",".join(segment.keys())}
+            step = {"seg_id": seg_id, 'mode': ",".join(segment.keys())}
             for key, val in segment.items():
                 val = deepcopy(val)
+                # bus
                 if key == 'bus':
                     connector = 'walking_1'
                     if len(val['buslines']) != 1:
-                        # FIXME 针对公交场景，存在2条或以上的公交车共线的情况，但就地铁而言，可能不存在此情况
+                        # FIXME 针对公交场景，存在2条或以上的公交车共线的情况，但就地铁而言不存在此情况
                         logger.warning(f"Check route {route_id} the buslines length:\n{val}")
-                    step.update(val['buslines'][0])
-
-                if key == 'walking':
+                    line = val['buslines'][0]
+                    step.update(line)
+                # walking
+                elif key == 'walking':
                     step[connector] = val
                     step[connector+"_info"] = {
                         "cost": int(val['cost']['duration']), 
                         "distance": int(val['distance'])
                     }
-                    
+                # taxi
+                elif key == 'taxi':
+                    step.update(val)
             steps.append(step)                    
 
         # 删除首尾步行的部分
@@ -478,43 +477,75 @@ def parse_transit_directions(data, route_type='地铁线路'):
         
         return steps
 
-    df = pd.DataFrame()
+    routes = pd.DataFrame()
     transits = data.get('route', {}).get("transits")
+    
+    # `transits` is None
     if not transits:
         logger.warning("No tranists records!")
-        return df
+        return routes
     
     lst = []
     for i, transit in enumerate(transits, start=0):
-        df = _extract_steps_from_plan(transit, i)
-        if route_type is not None and route_type not in df['type'].unique():
+        routes = _extract_steps_from_plan(transit, i)
+        if mode is not None and mode not in routes['type'].unique():
             continue
-        df.loc[:, 'route'] = i
-        lst.append(df)
+        routes.loc[:, 'route'] = i
+        lst.append(routes)
     
-    if lst: df = pd.concat(lst).reset_index(drop=True)
+    if lst: routes = pd.concat(lst).reset_index(drop=True)
 
-    df = df.replace('', np.nan).dropna(axis=1, how='all')
-    df.rename(columns={'id': 'bid'}, inplace=True)
-    df.loc[:, 'cost'] = df.cost.apply(lambda x: x.get('duration', np.nan) if isinstance(x, dict) else x)
+    routes = routes.replace('', np.nan).dropna(axis=1, how='all')
+    routes.rename(columns={'id': 'bid'}, inplace=True)
+    routes.loc[:, 'cost'] = routes.cost.apply(lambda x: x.get('duration', np.nan) if isinstance(x, dict) else x)
 
-    return df
+    if inshort:
+        routes.departure_stop = routes.departure_stop.apply(lambda x: x['name'])
+        routes.arrival_stop = routes.arrival_stop.apply(lambda x: x['name'])
 
-routes = parse_transit_directions(response_data, route_type)
-routes = filter_dataframe_columns(routes, ROUTE_COLUMNS + ['walking_0_info', 'walking_1_info', 'sub_seg'])
-routes.departure_stop = routes.departure_stop.apply(lambda x: x['name'])
-routes.arrival_stop = routes.arrival_stop.apply(lambda x: x['name'])
+    if verbose:
+        _routes = filter_dataframe_columns(routes, ROUTE_COLUMNS + ['walking_0_info', 'walking_1_info', 'mode'])
+        str_routes = []
+        for route_id in routes.route.unique():
+            route = _routes.query(f"route == {route_id}")
+            str_routes.append(f"Route {route_id}:\n{route}")
+
+        pre_states = ""
+        logger.debug(pre_states + "\n" + "\n\n".join(str_routes))
+
+    return routes
+
+routes = parse_transit_directions(response_data, inshort=False, mode=mode)
+routes = filter_dataframe_columns(routes, ROUTE_COLUMNS + ['walking_0_info', 'walking_1_info', 'mode'])
+
 routes
 
 # %%
-str_routes = []
-for route_id in routes.route.unique():
-    route = routes.query(f"route == {route_id}")
-    str_routes.append(f"Route {route_id}:\n{route}")
+#! filter_transit_directions + link + connector 
 
-pre_states = ""
-logger.debug(pre_states + "\n" + "\n\n".join(str_routes))
+direct = True
 
+route_id = 1
+route = routes.query(f"route == {route_id}")
+route
 
+#%%
+walkings = []
+prev = route.iloc[0].arrival_stop
+prev_mode = route.iloc[0].type
+for seg in route.iloc[1:].itertuples():
+    # FIXME walking_0_info 可能为空
+    if prev_mode == '地铁线路':
+        cur = seg.departure_stop
+        info = {'src': prev, 'dst': cur}
+        if seg.walking_0_info == seg.walking_0_info:
+            info.update(seg.walking_0_info)
+        walkings.append(info)
+        
+    prev = seg.arrival_stop
+    prev_mode = seg.type
+
+pd.DataFrame(walkings)    
+    
 
 # %%
