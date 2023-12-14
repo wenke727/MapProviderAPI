@@ -1,8 +1,9 @@
 import json
 import requests
+from loguru import logger
 
 
-def query_transit_directions(ori, dst, city1, city2, key, strategy=0, show_fields='cost,navi', multiexport=1):
+def query_transit_directions(src, dst, city1, city2, key, strategy=0, show_fields='cost,navi', multiexport=1, memo={}):
     """
     高德地图公交路线规划 API 服务地址
 
@@ -19,10 +20,13 @@ def query_transit_directions(ori, dst, city1, city2, key, strategy=0, show_field
     Ref:
         - https://lbs.amap.com/api/webservice/guide/api/newroute#t9
     """
+    if (src, dst, strategy) in memo:
+        return memo[(src, dst, strategy)]
+    
     url = "https://restapi.amap.com/v5/direction/transit/integrated"
     params = {
         'key': key,
-        'origin': ori,
+        'origin': src,
         'destination': dst,
         'city1': city1,
         'city2': city2,
@@ -30,10 +34,13 @@ def query_transit_directions(ori, dst, city1, city2, key, strategy=0, show_field
         'show_fields': show_fields,
         'multiexport': multiexport
     }
+    logger.debug(f"{url}?{'&'.join(['{k}={v}' for k, v in params.items()])}")
 
     response = requests.get(url, params=params)
+    response = json.loads(response.text)
+    memo[(src, dst, strategy)] = response
 
-    return json.loads(response.text)
+    return response
 
 if __name__ == "__main__":
     # query_transit_directions()

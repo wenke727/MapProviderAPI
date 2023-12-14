@@ -35,7 +35,7 @@ def make_logger(folder, filename=None, level='DEBUG', mode='w', console=True,
     if filename is None:
         filename = "log"
     if include_timestamp:
-        timestamp = time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())
+        timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
         filename = f"{filename}_{timestamp}"
     log_filename = f"{filename}.log"
     log_path = os.path.join(folder, log_filename)

@@ -31,26 +31,9 @@ from utils.serialization import load_checkpoint, save_checkpoint
 logger = make_logger('../cache', 'network', include_timestamp=False)
 
 ROUTE_COLUMNS = ['route', 'seg_id', 'type', 'name', 'departure_stop', 'arrival_stop',  'distance', 'cost']
-
+DIRECTION_MEMO = {}
 
 """ 弃用 """
-def __route_formatter():
-    idx_0 = 1 if route.iloc[0].type == '步行' else 0
-    idx_n = -1 if route.iloc[-1].type == '步行' else None
-
-    filter_route = route.iloc[idx_0: idx_n]
-
-    instructions = []
-    for seg in route.itertuples():
-        if seg.type == '步行':
-            instructions.append(f"步行{seg.distance}m({seg.cost}s)")
-        if seg.type == "地铁线路":
-            line = seg.name.split('(')[0]
-            src, dst = seg.departure_stop['name'], seg.arrival_stop['name']
-            instructions.append(f"\n{line}({src}--{dst}): {int(seg.cost)/60:.1f}m, ")
-
-    logger.debug("".join(instructions))
-
 def __get_exchange_info():
     #! 增加换乘的记录
     route_0 = query_dataframe(routes, 'route', 0)
@@ -178,6 +161,7 @@ def parse_transit_directions(data, route_type='地铁线路'):
 
     return df  # 返回解析后的数据
 
+# FIXME
 def get_subway_segment_info(line_stations, strategy=2):
     links = []
     directions_res = []
@@ -186,7 +170,7 @@ def get_subway_segment_info(line_stations, strategy=2):
     src = line_stations.iloc[0]
     for i, dst in enumerate(line_stations.iloc[1:].itertuples(), start=1):
         logger.info(f"{src['name']} -> {dst.name}")
-        response_data = query_transit_directions(src.location, dst.location, '0755', '0755', KEY, strategy)
+        response_data = query_transit_directions(src.location, dst.location, '0755', '0755', KEY, strategy, memo=DIRECTION_MEMO)
         plans = parse_transit_directions(response_data)
         routes = plans.query("type == '地铁线路'")
         if routes.empty:
@@ -209,7 +193,7 @@ def get_subway_segment_info(line_stations, strategy=2):
 
     # the fisrt segment
     src, dst = line_stations.iloc[1].location, line_stations.iloc[-1].location
-    response_data = query_transit_directions(src, dst, '0755', '0755', KEY, strategy)
+    response_data = query_transit_directions(src, dst, '0755', '0755', KEY, strategy, memo=DIRECTION_MEMO)
     plans = parse_transit_directions(response_data)
     directions_res.append(plans.query("type == '地铁线路'").iloc[[0]])
 
@@ -234,12 +218,22 @@ def get_subway_segment_info(line_stations, strategy=2):
 
     return nodes.set_index('nid'), df_links, directions_res
 
+def get_routes(src:pd.Series, dst:pd.Series, strategy:int, citycode:str='0755'):
+    response_data = query_transit_directions(
+        src.location, dst.location, citycode, citycode, KEY, strategy, memo=DIRECTION_MEMO)
+    routes = parse_transit_directions(response_data, mode=mode)
+    # routes = filter_dataframe_columns(routes, ROUTE_COLUMNS + ['walking_0_info', 'walking_1_info', 'mode'])
+    
+    walking_steps = extract_all_route_walking_steps(routes)
+    
+    return routes, walking_steps
+
 def query_transit_by_pinyin(src, dst, df_stations, strategy=0, route_type=None):
     """ 通过中文的`起点站名`和`终点站名`查询线路 """
     start = df_stations.query(f"name == '{src}'")
     end = df_stations.query(f"name == '{dst}'")
 
-    response_text = query_transit_directions(start.location, end.location, '0755', '0755', KEY, strategy)
+    response_text = query_transit_directions(start.location, end.location, '0755', '0755', KEY, strategy, memo=DIRECTION_MEMO)
     commute = parse_transit_directions(response_text, route_type)
     
     return commute
@@ -297,6 +291,7 @@ class MetroNetwork:
         edges_data = self.graph.edges(data=True)
         return pd.DataFrame([{'src': u, 'dst': v, **data} for u, v, data in edges_data])
 
+    # FIXME
     def add_line(self, line_id, strategy=2):
         """ 获取某一条线路的信息 """
         if line_id in self.visited_lines:
@@ -321,11 +316,12 @@ class MetroNetwork:
 
     def get_exchange_stations(self):
         tmp = self.df_stations.groupby('name')\
-                .agg({'id': 'count', 'line_id': list})\
+                .agg({'id': 'count', 'line_id': list, 'location': np.unique})\
                 .query("id > 2")\
                 .reset_index().rename(columns={'id': 'num'})
-
-        return tmp
+        tmp.loc[:, 'link'] = tmp.location.apply(lambda x: len(x) > 1)
+        
+        return tmp.sort_values(['num', 'link'], ascending=False)
 
     def get_adj_nodes(self, nid, type='same_line'):
         assert type in ['same_line', 'exchange', None]
@@ -395,7 +391,7 @@ def get_exchange_link_info(nodes, station_name):
             end = nodes.loc[dst.next]
             logger.debug(f"{start['name']} -> {end['name']}")
 
-def parse_transit_directions(data, inshort=True, mode='地铁线路', verbose=True):
+def parse_transit_directions(data, mode='地铁线路', verbose=True):
     def _extract_steps_from_plan(route, route_id):
         steps = []
         for seg_id, segment in enumerate(route['segments']):
@@ -407,8 +403,8 @@ def parse_transit_directions(data, inshort=True, mode='地铁线路', verbose=Tr
                 if key == 'bus':
                     connector = 'walking_1'
                     if len(val['buslines']) != 1:
-                        # FIXME 针对公交场景，存在2条或以上的公交车共线的情况，但就地铁而言不存在此情况
-                        logger.warning(f"Check route {route_id} the buslines length:\n{val}")
+                    #     # FIXME 针对公交场景，存在2条或以上的公交车共线的情况，但就地铁而言不存在此情况
+                        logger.debug(f"Check route {route_id} the buslines length, types: {[item['type'] for item in val['buslines']]}")
                     line = val['buslines'][0]
                     step.update(line)
                 # walking
@@ -454,10 +450,6 @@ def parse_transit_directions(data, inshort=True, mode='地铁线路', verbose=Tr
     routes.rename(columns={'id': 'bid'}, inplace=True)
     routes.loc[:, 'cost'] = routes.cost.apply(lambda x: x.get('duration', np.nan) if isinstance(x, dict) else x)
 
-    if inshort:
-        routes.departure_stop = routes.departure_stop.apply(lambda x: x['name'])
-        routes.arrival_stop = routes.arrival_stop.apply(lambda x: x['name'])
-
     if verbose:
         _routes = filter_dataframe_columns(routes, ROUTE_COLUMNS + ['walking_0_info', 'walking_1_info', 'mode'])
         str_routes = []
@@ -472,71 +464,6 @@ def parse_transit_directions(data, inshort=True, mode='地铁线路', verbose=Tr
         logger.debug(pre_states + "\n" + "\n\n".join(str_routes))
 
     return routes
-
-
-
-if __name__ == "__main__":
-    line_fn = '../data/subway/wgs/shenzhen_subway_lines_wgs.geojson'
-    ckpt = '../data/subway/shenzhen_network.ckpt'
-    # ckpt = None
-    metro = MetroNetwork(line_fn=line_fn, ckpt=ckpt)
-
-    self = metro
-    G = metro.graph
-    df_lines = metro.df_lines
-    df_stations = metro.df_stations
-
-    # metro.add_line('440300024064')
-    # metro.add_line('440300024063')
-    # metro.add_line('440300024077')
-    # metro.add_line('440300024076')
-    metro.add_line('440300024061') # 地铁3号线(龙岗线)(福保--双龙) 
-    metro.add_line('440300024075') # 地铁4号线(龙华线)(福田口岸--牛湖)
-    metro.add_line('440300024056') # 地铁11号线(机场线)(岗厦北--碧头)
-    metro.add_line('440300024057') # 地铁11号线(机场线)(碧头--岗厦北)
-    metro.add_line('900000094862') # 地铁12号线(南宝线)(海上田园东--左炮台东)
-
-    line_id = '900000094863' # 地铁12号线(南宝线)(左炮台东--海上田园东)
-    metro.add_line(line_id)
-    
-    # nodes, edges
-    nodes = metro.nodes_to_dataframe()
-    edges = metro.edges_to_dataframe()
-
-
-
-#%%
-station_name = '南山' # 车公庙 福田
-get_exchange_link_info(nodes, station_name)
-
-
-#%%
-" query -> parse -> filter -> result "
-"""
-#! 重新梳理流程
-# TODO
-    x 第一段的步行和最后一段的步行可以忽略
-    x formatter
-    - 校核起点和终点是否一致；
-"""
-
-# src, dst = '后海', '南光'
-src, dst = '南山', '上梅林'
-# src, dst = '左炮台东', '福永'
-
-strategy = 0
-mode = "地铁线路"
-start = df_stations.query(f"name == '{src}'")
-end = df_stations.query(f"name == '{dst}'")
-
-response_data = query_transit_directions(start.location, end.location, '0755', '0755', KEY, strategy)
-
-#%%
-routes = parse_transit_directions(response_data, inshort=False, mode=mode)
-routes = filter_dataframe_columns(routes, ROUTE_COLUMNS + ['walking_0_info', 'walking_1_info', 'mode'])
-routes
-
-# %%
 
 def extract_walking_steps(route):
     walkings = []
@@ -569,6 +496,9 @@ def extract_all_route_walking_steps(routes):
         walkinhg_steps.loc[:, 'route'] = idx
         walkinhg_steps_lst.append(walkinhg_steps)
 
+    if len(walkinhg_steps_lst) == 0:
+        return pd.DataFrame()
+
     walkings = pd.concat(walkinhg_steps_lst, axis=0)#.drop_duplicates(['src', 'dst'])
     walkings.loc[:, 'station_name'] = walkings.src.apply(lambda x: x['name'])
     walkings.loc[:, 'src_id'] = walkings.src.apply(lambda x: x['id'])
@@ -582,6 +512,87 @@ def extract_all_route_walking_steps(routes):
 
     return walkings
 
-extract_all_route_walking_steps(routes)
 
+if __name__ == "__main__":
+    line_fn = '../data/subway/wgs/shenzhen_subway_lines_wgs.geojson'
+    ckpt = '../data/subway/shenzhen_network.ckpt'
+    ckpt = None
+    metro = MetroNetwork(line_fn=line_fn, ckpt=ckpt)
+
+    self = metro
+    G = metro.graph
+    df_lines = metro.df_lines
+    df_stations = metro.df_stations
+
+    # metro.add_line('440300024064')
+    # metro.add_line('440300024063')
+    # metro.add_line('440300024077')
+    # metro.add_line('440300024076')
+    # metro.add_line('440300024061') # 地铁3号线(龙岗线)(福保--双龙) 
+    # metro.add_line('440300024075') # 地铁4号线(龙华线)(福田口岸--牛湖)
+    # metro.add_line('440300024056') # 地铁11号线(机场线)(岗厦北--碧头)
+    # metro.add_line('440300024057') # 地铁11号线(机场线)(碧头--岗厦北)
+    # metro.add_line('900000094862') # 地铁12号线(南宝线)(海上田园东--左炮台东)
+    # line_id = '900000094863' # 地铁12号线(南宝线)(左炮台东--海上田园东)
+    
+    # for line_id in metro.df_lines.line_id.values:
+    #     try:
+    #         metro.add_line(line_id)
+    #         metro.save_ckpt()
+    #         break
+    #     except:
+    #         logger.error(f"line_id: {line_id}")
+    
+    # nodes, edges
+    # nodes = metro.nodes_to_dataframe()
+    # edges = metro.edges_to_dataframe()
+
+
+#%%
+station_name = '南山' # 车公庙 福田
+get_exchange_link_info(nodes, station_name)
+
+
+#%%
+" query -> parse -> filter -> result "
+"""
+#! 重新梳理流程
+# TODO
+    x 第一段的步行和最后一段的步行可以忽略
+    x formatter
+    - 校核起点和终点是否一致；
+"""
+
+src, dst = '后海', '南光'
+# src, dst = '南山', '上梅林'
+# src, dst = '左炮台东', '福永'
+
+strategy = 0
+mode = "地铁线路"
+start = df_stations.query(f"name == '{src}'").iloc[0]
+end = df_stations.query(f"name == '{dst}'").iloc[0]
+
+routes, walking_steps = get_routes(start, end, strategy)
+
+walking_steps
+
+# %%
+line_id = '440300024057' # 地铁11号线(机场线)(岗厦北--碧头)
+strategy = 2
+citycode = '0755'
+stations = query_dataframe(self.df_stations, 'line_id', line_id)
+
+
+routes_lst = []
+for i, (src, dst) in enumerate(
+    zip(stations.iloc[:-1].itertuples(), 
+        stations.iloc[1:].itertuples())):
+    # print(i, src.name, dst.name)
+    routes, walking_steps = get_routes(src, dst, strategy, citycode)
+    routes_lst.append(routes.iloc[[0]])
+
+pd.concat(routes_lst)
+# %%
+src, dst = stations.iloc[1], stations.iloc[-1]
+src
 # %%
