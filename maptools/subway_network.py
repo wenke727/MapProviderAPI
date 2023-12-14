@@ -92,6 +92,12 @@ def _split_line_name(series):
 
 def _load_subway_lines(line_fn):
     df_lines = gpd.read_file(line_fn).rename(columns={'id': 'line_id'})
+    if "status" in list(df_lines):
+        df_lines.status = df_lines.status.astype(int)
+        unavailabel_line = df_lines.query("status != 1").name.unique().tolist()
+        logger.warning(f"Unavailabel lines: {unavailabel_line}")
+        df_lines.query('status == 1', inplace=True)
+
     names = _split_line_name(df_lines.name)
     df_lines = pd.concat([names, df_lines], axis=1)
     
@@ -108,6 +114,14 @@ def _extract_stations_from_lines(df_lines, keep_attrs = ['line_id', 'line_name']
     )
 
     return df_stations.reset_index(drop=True)
+
+def _get_exchange_station_names(df_stations):
+    """ get the name list of exhange stations. """
+    exchange = df_stations.groupby('name').location.nunique()
+    exchange_station_names = exchange[exchange > 1].index.to_list()
+
+    return exchange_station_names
+
 
 """ 解析函数 """
 def filter_dataframe_columns(df, cols=ROUTE_COLUMNS):
@@ -305,8 +319,7 @@ class MetroNetwork:
         
         return None
 
-    @property
-    def exchange_stations(self):
+    def get_exchange_stations(self):
         tmp = self.df_stations.groupby('name')\
                 .agg({'id': 'count', 'line_id': list})\
                 .query("id > 2")\
@@ -352,7 +365,7 @@ class MetroNetwork:
         # TODO 获取地铁的发车时间间隔
         pass
 
-""" 待开发 """
+""" 待开发 & 开发 """
 def check_shortest_path():
     src = "440300024057010" # 11号线，南山
     dst = "440300024057013" # 11号线，福田
@@ -381,64 +394,6 @@ def get_exchange_link_info(nodes, station_name):
             start = nodes.loc[src.prev]
             end = nodes.loc[dst.next]
             logger.debug(f"{start['name']} -> {end['name']}")
-
-if __name__ == "__main__":
-    line_fn = '../data/subway/wgs/shenzhen_subway_lines_wgs.geojson'
-    ckpt = '../data/subway/shenzhen_network.ckpt'
-    # ckpt = None
-    metro = MetroNetwork(line_fn=line_fn, ckpt=ckpt)
-
-    self = metro
-    G = metro.graph
-    df_lines = metro.df_lines
-    df_stations = metro.df_stations
-
-    # metro.add_line('440300024064')
-    # metro.add_line('440300024063')
-    # metro.add_line('440300024077')
-    # metro.add_line('440300024076')
-    metro.add_line('440300024061') # 地铁3号线(龙岗线)(福保--双龙) 
-    metro.add_line('440300024075') # 地铁4号线(龙华线)(福田口岸--牛湖)
-    metro.add_line('440300024056') # 地铁11号线(机场线)(岗厦北--碧头)
-    metro.add_line('440300024057') # 地铁11号线(机场线)(碧头--岗厦北)
-    metro.add_line('900000094862') # 地铁12号线(南宝线)(海上田园东--左炮台东)
-
-    line_id = '900000094863' # 地铁12号线(南宝线)(左炮台东--海上田园东)
-    metro.add_line(line_id)
-    
-    # nodes, edges
-    nodes = metro.nodes_to_dataframe()
-    edges = metro.edges_to_dataframe()
-
-
-
-#%%
-station_name = '南山'
-get_exchange_link_info(nodes, station_name)
-
-
-#%%
-" query -> parse -> filter -> result "
-"""
-#! 重新梳理流程
-# TODO
-    x 第一段的步行和最后一段的步行可以忽略
-    x formatter
-    - 校核起点和终点是否一致；
-"""
-
-src, dst = '后海', '南光'
-src, dst = '南山', '上梅林'
-# src, dst = '左炮台东', '福永'
-
-strategy = 0
-mode = "地铁线路"
-start = df_stations.query(f"name == '{src}'")
-end = df_stations.query(f"name == '{dst}'")
-
-response_data = query_transit_directions(start.location, end.location, '0755', '0755', KEY, strategy)
-
-#%%
 
 def parse_transit_directions(data, inshort=True, mode='地铁线路', verbose=True):
     def _extract_steps_from_plan(route, route_id):
@@ -507,7 +462,10 @@ def parse_transit_directions(data, inshort=True, mode='地铁线路', verbose=Tr
         _routes = filter_dataframe_columns(routes, ROUTE_COLUMNS + ['walking_0_info', 'walking_1_info', 'mode'])
         str_routes = []
         for route_id in routes.route.unique():
-            route = _routes.query(f"route == {route_id}")
+            route = _routes.query(f"route == {route_id}").copy()
+            route.departure_stop = route.departure_stop.apply(lambda x: x['name'])
+            route.arrival_stop = route.arrival_stop.apply(lambda x: x['name'])
+            # route.drop(columns=['route'], inplace=True)
             str_routes.append(f"Route {route_id}:\n{route}")
 
         pre_states = ""
@@ -515,37 +473,115 @@ def parse_transit_directions(data, inshort=True, mode='地铁线路', verbose=Tr
 
     return routes
 
+
+
+if __name__ == "__main__":
+    line_fn = '../data/subway/wgs/shenzhen_subway_lines_wgs.geojson'
+    ckpt = '../data/subway/shenzhen_network.ckpt'
+    # ckpt = None
+    metro = MetroNetwork(line_fn=line_fn, ckpt=ckpt)
+
+    self = metro
+    G = metro.graph
+    df_lines = metro.df_lines
+    df_stations = metro.df_stations
+
+    # metro.add_line('440300024064')
+    # metro.add_line('440300024063')
+    # metro.add_line('440300024077')
+    # metro.add_line('440300024076')
+    metro.add_line('440300024061') # 地铁3号线(龙岗线)(福保--双龙) 
+    metro.add_line('440300024075') # 地铁4号线(龙华线)(福田口岸--牛湖)
+    metro.add_line('440300024056') # 地铁11号线(机场线)(岗厦北--碧头)
+    metro.add_line('440300024057') # 地铁11号线(机场线)(碧头--岗厦北)
+    metro.add_line('900000094862') # 地铁12号线(南宝线)(海上田园东--左炮台东)
+
+    line_id = '900000094863' # 地铁12号线(南宝线)(左炮台东--海上田园东)
+    metro.add_line(line_id)
+    
+    # nodes, edges
+    nodes = metro.nodes_to_dataframe()
+    edges = metro.edges_to_dataframe()
+
+
+
+#%%
+station_name = '南山' # 车公庙 福田
+get_exchange_link_info(nodes, station_name)
+
+
+#%%
+" query -> parse -> filter -> result "
+"""
+#! 重新梳理流程
+# TODO
+    x 第一段的步行和最后一段的步行可以忽略
+    x formatter
+    - 校核起点和终点是否一致；
+"""
+
+# src, dst = '后海', '南光'
+src, dst = '南山', '上梅林'
+# src, dst = '左炮台东', '福永'
+
+strategy = 0
+mode = "地铁线路"
+start = df_stations.query(f"name == '{src}'")
+end = df_stations.query(f"name == '{dst}'")
+
+response_data = query_transit_directions(start.location, end.location, '0755', '0755', KEY, strategy)
+
+#%%
 routes = parse_transit_directions(response_data, inshort=False, mode=mode)
 routes = filter_dataframe_columns(routes, ROUTE_COLUMNS + ['walking_0_info', 'walking_1_info', 'mode'])
-
 routes
 
 # %%
-#! filter_transit_directions + link + connector 
 
-direct = True
+def extract_walking_steps(route):
+    walkings = []
+    prev = route.iloc[0].arrival_stop
+    prev_mode = route.iloc[0].type
 
-route_id = 1
-route = routes.query(f"route == {route_id}")
-route
+    for seg in route.iloc[1:].itertuples():
+        # FIXME walking_0_info 可能为空
+        if prev_mode == '地铁线路':
+            cur = seg.departure_stop
+            info = {'src': prev, 'dst': cur}
+            if seg.walking_0_info == seg.walking_0_info:
+                info.update(seg.walking_0_info)
+            walkings.append(info)
+            
+        prev = seg.arrival_stop
+        prev_mode = seg.type
 
-#%%
-walkings = []
-prev = route.iloc[0].arrival_stop
-prev_mode = route.iloc[0].type
-for seg in route.iloc[1:].itertuples():
-    # FIXME walking_0_info 可能为空
-    if prev_mode == '地铁线路':
-        cur = seg.departure_stop
-        info = {'src': prev, 'dst': cur}
-        if seg.walking_0_info == seg.walking_0_info:
-            info.update(seg.walking_0_info)
-        walkings.append(info)
-        
-    prev = seg.arrival_stop
-    prev_mode = seg.type
-
-pd.DataFrame(walkings)    
+    return pd.DataFrame(walkings)
     
+def extract_all_route_walking_steps(routes):
+    route_ids = routes.route.unique()
+
+    walkinhg_steps_lst = []
+    for idx in route_ids:
+        route = routes.query(f"route == {idx}")
+        walkinhg_steps = extract_walking_steps(route)
+        if walkinhg_steps.empty:
+            continue
+        walkinhg_steps.loc[:, 'route'] = idx
+        walkinhg_steps_lst.append(walkinhg_steps)
+
+    walkings = pd.concat(walkinhg_steps_lst, axis=0)#.drop_duplicates(['src', 'dst'])
+    walkings.loc[:, 'station_name'] = walkings.src.apply(lambda x: x['name'])
+    walkings.loc[:, 'src_id'] = walkings.src.apply(lambda x: x['id'])
+    walkings.loc[:, 'dst_id'] = walkings.dst.apply(lambda x: x['id'])
+    walkings.loc[:, 'src_loc'] = walkings.src.apply(lambda x: x['location'])
+    walkings.loc[:, 'dst_loc'] = walkings.dst.apply(lambda x: x['location'])
+    walkings.loc[:, 'same_loc'] = walkings.src_loc == walkings.dst_loc
+    walkings.drop(columns=['src', 'dst'], inplace=True)
+
+    walkings.drop_duplicates(['src_id', 'dst_id', 'src_loc'], inplace=True)
+
+    return walkings
+
+extract_all_route_walking_steps(routes)
 
 # %%
