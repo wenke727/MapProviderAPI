@@ -34,7 +34,7 @@ def query_transit_directions(src, dst, city1, city2, key, strategy=0, show_field
         'show_fields': show_fields,
         'multiexport': multiexport
     }
-    logger.debug(f"{url}?{'&'.join(['{k}={v}' for k, v in params.items()])}")
+    logger.debug(f"{url}?{'&'.join([f'{k}={v}' for k, v in params.items()])}")
 
     response = requests.get(url, params=params)
     response = json.loads(response.text)
