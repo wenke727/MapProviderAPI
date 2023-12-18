@@ -10,7 +10,7 @@ from loguru import logger
 from itertools import islice
 
 from cfg import KEY
-from provider.direction import query_transit_directions
+from provider.direction import query_transit_directions, parse_transit_directions
 from utils.logger import make_logger
 from utils.dataframe import query_dataframe
 from utils.serialization import load_checkpoint, save_checkpoint
@@ -18,32 +18,10 @@ logger = make_logger('../cache', 'network', include_timestamp=False)
 
 ROUTE_COLUMNS = ['route', 'seg_id', 'type', 'name', 'departure_stop', 'arrival_stop',  'distance', 'cost']
 DIRECTION_MEMO = {}
+DIRECTION_MEMO_FN = "../data/subway/direction_memo.pkl"
+DIRECTION_MEMO = load_checkpoint(DIRECTION_MEMO_FN)
 
 #%%
-""" 弃用 """
-def __get_exchange_info():
-    #! 增加换乘的记录
-    route_0 = query_dataframe(routes, 'route', 0)
-    subways = route_0.iloc[::2]
-    walkings = route_0.iloc[1::2]
-
-    cond = (subways['type'] == '地铁线路').all() and \
-        (walkings['type'] == '步行').all() and \
-        len(subways) - 1 == len(walkings)
-
-    links = []
-    for i in range(walkings.shape[0]):
-        links.append({
-            'src': subways.iloc[i].arrival_stop['id'],
-            'dst': subways.iloc[i + 1].departure_stop['id'],
-            'distance': walkings.iloc[i].distance,
-            'duration': walkings.iloc[i].cost,
-            'type': '步行',
-            'steps': walkings.iloc[i].steps,
-        })
-    for link in links:
-        metro.add_edge(**link)
-
 
 """ 辅助函数 """
 def _split_line_name(series):
@@ -261,81 +239,19 @@ def get_exchange_link_info(nodes, station_name):
             end = nodes.loc[dst.next]
             logger.debug(f"{start['name']} -> {end['name']}")
 
-def parse_transit_directions(data, mode='地铁线路', verbose=True):
-    def _extract_steps_from_plan(route, route_id):
-        steps = []
-        for seg_id, segment in enumerate(route['segments']):
-            connector = 'walking_0'
-            step = {"seg_id": seg_id, 'mode': ",".join(segment.keys())}
-            for key, val in segment.items():
-                val = deepcopy(val)
-                # bus
-                if key == 'bus':
-                    connector = 'walking_1'
-                    if len(val['buslines']) != 1:
-                         # 针对公交场景，存在2条或以上的公交车共线的情况，但就地铁而言不存在此情况
-                        modes = np.unique([item['type'] for item in val['buslines']])
-                        if len(modes) > 1:
-                            logger.warning(f"Check route {route_id} the buslines length, types: {list(modes)}")
-                    line = val['buslines'][0]
-                    step.update(line)
-                # walking
-                elif key == 'walking':
-                    step[connector] = val
-                    step[connector+"_info"] = {
-                        "cost": int(val['cost']['duration']), 
-                        "distance": int(val['distance'])
-                    }
-                # taxi
-                elif key == 'taxi':
-                    step.update(val)
-            steps.append(step)                    
+def print_routes(routes):
+    _routes = filter_dataframe_columns(routes, ROUTE_COLUMNS + ['walking_0_info', 'walking_1_info', 'mode'])
+    str_routes = []
+    for route_id in routes.route.unique():
+        route = _routes.query(f"route == {route_id}").copy()
+        route.departure_stop = route.departure_stop.apply(lambda x: x['name'])
+        route.arrival_stop = route.arrival_stop.apply(lambda x: x['name'])
+        # route.drop(columns=['route'], inplace=True)
+        str_routes.append(f"Route {route_id}:\n{route}")
 
-        # 删除首尾步行的部分
-        steps = pd.DataFrame(steps)
-        if steps.iloc[0].type != steps.iloc[0].type:
-            steps = steps.iloc[1:]
-        if steps.iloc[-1].type != steps.iloc[-1].type:
-            steps = steps.iloc[:-1]
-        
-        return steps
+    pre_states = ""
+    logger.debug(pre_states + "\n" + "\n\n".join(str_routes))
 
-    routes = pd.DataFrame()
-    transits = data.get('route', {}).get("transits")
-    
-    # `transits` is None
-    if not transits:
-        logger.warning("No tranists records!")
-        return routes
-    
-    lst = []
-    for i, transit in enumerate(transits, start=0):
-        routes = _extract_steps_from_plan(transit, i)
-        if mode is not None and mode not in routes['type'].unique():
-            continue
-        routes.loc[:, 'route'] = i
-        lst.append(routes)
-    
-    if lst: routes = pd.concat(lst).reset_index(drop=True)
-
-    routes = routes.replace('', np.nan).dropna(axis=1, how='all')
-    routes.rename(columns={'id': 'bid'}, inplace=True)
-    routes.loc[:, 'cost'] = routes.cost.apply(lambda x: x.get('duration', np.nan) if isinstance(x, dict) else x)
-
-    if verbose:
-        _routes = filter_dataframe_columns(routes, ROUTE_COLUMNS + ['walking_0_info', 'walking_1_info', 'mode'])
-        str_routes = []
-        for route_id in routes.route.unique():
-            route = _routes.query(f"route == {route_id}").copy()
-            route.departure_stop = route.departure_stop.apply(lambda x: x['name'])
-            route.arrival_stop = route.arrival_stop.apply(lambda x: x['name'])
-            # route.drop(columns=['route'], inplace=True)
-            str_routes.append(f"Route {route_id}:\n{route}")
-
-        pre_states = ""
-        logger.debug(pre_states + "\n" + "\n\n".join(str_routes))
-
-    return routes
 
 def extract_walking_steps(route):
     walkings = []
@@ -462,7 +378,6 @@ def get_subway_segment_info(stations, strategy=0, citycode='0755'):
     return df_links, df_nodes
 
 
-#%%
 if __name__ == "__main__":
     line_fn = '../data/subway/wgs/shenzhen_subway_lines_wgs.geojson'
     ckpt = '../data/subway/shenzhen_network.ckpt'
@@ -474,81 +389,33 @@ if __name__ == "__main__":
     df_lines = metro.df_lines
     df_stations = metro.df_stations
 
-    # metro.add_line('440300024064')
-    # metro.add_line('440300024063')
-    # metro.add_line('440300024077')
-    # metro.add_line('440300024076')
-    # metro.add_line('440300024061') # 地铁3号线(龙岗线)(福保--双龙) 
-    # metro.add_line('440300024075') # 地铁4号线(龙华线)(福田口岸--牛湖)
-    # metro.add_line('440300024056') # 地铁11号线(机场线)(岗厦北--碧头)
-    # metro.add_line('440300024057') # 地铁11号线(机场线)(碧头--岗厦北)
-    # metro.add_line('900000094862') # 地铁12号线(南宝线)(海上田园东--左炮台东)
-    # line_id = '900000094863' # 地铁12号线(南宝线)(左炮台东--海上田园东)
     
     # nodes, edges
     nodes = metro.nodes_to_dataframe()
     edges = metro.edges_to_dataframe()
 
 #%%
-line_names = ['地铁1号线', '地铁3号线', '地铁4号线', '地铁9号线', '地铁11号线']
-for line_id in df_lines.query("line_name in @line_names").line_id.values:
-    metro.add_line(line_id)
-    metro.save_ckpt()
+lines_iter = iter(df_lines.iterrows())
+# for i, line in df_lines.iterrows():
 
 #%%
-station_name = '南山' # 车公庙 福田
-get_exchange_link_info(nodes, station_name)
+#! 地铁5号线, 地铁7号线
 
+i, line = next(lines_iter)
+logger.info(f"{line.line_name}")
+line_id = line['line_id']
+line_name = line['line_name']
 
-#%%
-" query -> parse -> filter -> result "
-"""
-#! 重新梳理流程
-# TODO
-    x 第一段的步行和最后一段的步行可以忽略
-    x formatter
-    - 校核起点和终点是否一致；
-"""
-
-src, dst = '后海', '南光'
-# src, dst = '南山', '上梅林'
-# src, dst = '左炮台东', '福永'
-
-strategy = 0
-mode = "地铁线路"
-start = df_stations.query(f"name == '{src}'").iloc[0]
-end = df_stations.query(f"name == '{dst}'").iloc[0]
-
-routes, walking_steps = get_routes(start, end, strategy)
-
-walking_steps
-
-# %%
-
-line_id = '440300024057' # 地铁11号线(机场线)(岗厦北--碧头)
-line_id = '440300024063' # 地铁1号线(罗宝线)(机场东--罗湖)
-# line_id = '440300024064' # 地铁1号线(罗宝线)(罗湖--机场东)
-line_id = '440300024055' # 地铁9号线(梅林线)(前湾--文锦)
-line_id = '440300024054' # 地铁9号线(梅林线)(文锦--前湾)
 stations = query_dataframe(self.df_stations, 'line_id', line_id)
-
-# nodes, edges, directions_res = get_subway_segment_info(stations, strategy=strategy)
-# self.add_nodes(nodes)
-# self.add_edges(edges)
-
-_edges, _nodes = get_subway_segment_info(stations)
-#%%
+_edges, _nodes = get_subway_segment_info(stations, strategy=2)
+# metro.add_line(line_id)
+# metro.save_ckpt()
+save_checkpoint(DIRECTION_MEMO, DIRECTION_MEMO_FN)
 _edges
 
 # %%
-_nodes
- 
-# %%
-metro.add_nodes(_nodes)
-metro.nodes_to_dataframe()
-
-# %%
-metro.add_edges(_edges)
-metro.edges_to_dataframe()
+station_name = "南山"
+# station_name = "上梅林"
+df_stations.query("name == @station_name").iloc[0].to_dict()
 
 # %%
