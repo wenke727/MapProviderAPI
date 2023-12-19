@@ -1,16 +1,14 @@
 #%%
 import time
-import json
 import numpy as np
 import pandas as pd
 import networkx as nx
 import geopandas as gpd
-from copy import deepcopy
 from loguru import logger
 from itertools import islice
 
 from cfg import KEY
-from provider.direction import query_transit_directions, parse_transit_directions
+from provider.direction import get_routes
 from utils.logger import make_logger
 from utils.dataframe import query_dataframe
 from utils.serialization import load_checkpoint, save_checkpoint
@@ -252,28 +250,6 @@ def print_routes(routes):
     pre_states = ""
     logger.debug(pre_states + "\n" + "\n\n".join(str_routes))
 
-
-def extract_walking_steps(route):
-    walkings = []
-    prev = route.iloc[0].arrival_stop
-    prev_mode = route.iloc[0].type
-
-    for seg in route.iloc[1:].itertuples():
-        # FIXME walking_0_info 可能为空
-        if prev_mode == '地铁线路':
-            if 'walking_0_info' not in list(seg):
-                continue
-            cur = seg.departure_stop
-            info = {'src': prev, 'dst': cur}
-            if seg.walking_0_info == seg.walking_0_info:
-                info.update(seg.walking_0_info)
-            walkings.append(info)
-            
-        prev = seg.arrival_stop
-        prev_mode = seg.type
-
-    return pd.DataFrame(walkings)
-    
 def _extract_segment_info_from_routes(routes_lst:list):
     df_segs = pd.concat(routes_lst)
     df_segs['cost'] = df_segs['cost'].astype(int)
@@ -305,43 +281,6 @@ def _extract_segment_info_from_routes(routes_lst:list):
     df_edges = pd.DataFrame(edges)
     
     return df_edges
-
-def _extract_walking_steps_from_routes(routes:pd.DataFrame):
-    route_ids = routes.route.unique()
-
-    walkinhg_steps_lst = []
-    for idx in route_ids:
-        route = routes.query(f"route == {idx}")
-        walkinhg_steps = extract_walking_steps(route)
-        if walkinhg_steps.empty:
-            continue
-        walkinhg_steps.loc[:, 'route'] = idx
-        walkinhg_steps_lst.append(walkinhg_steps)
-
-    if len(walkinhg_steps_lst) == 0:
-        return pd.DataFrame()
-
-    walkings = pd.concat(walkinhg_steps_lst, axis=0)#.drop_duplicates(['src', 'dst'])
-    walkings.loc[:, 'station_name'] = walkings.src.apply(lambda x: x['name'])
-    walkings.loc[:, 'src_id'] = walkings.src.apply(lambda x: x['id'])
-    walkings.loc[:, 'dst_id'] = walkings.dst.apply(lambda x: x['id'])
-    walkings.loc[:, 'src_loc'] = walkings.src.apply(lambda x: x['location'])
-    walkings.loc[:, 'dst_loc'] = walkings.dst.apply(lambda x: x['location'])
-    walkings.loc[:, 'same_loc'] = walkings.src_loc == walkings.dst_loc
-    walkings.drop(columns=['src', 'dst'], inplace=True)
-
-    walkings.drop_duplicates(['src_id', 'dst_id', 'src_loc'], inplace=True)
-
-    return walkings
-
-def get_routes(src:pd.Series, dst:pd.Series, strategy:int, citycode:str='0755', mode:str='地铁线路'):
-    response_data = query_transit_directions(
-        src.location, dst.location, citycode, citycode, KEY, strategy, memo=DIRECTION_MEMO)
-    routes = parse_transit_directions(response_data, mode=mode)
-    
-    walking_steps = _extract_walking_steps_from_routes(routes)
-    
-    return routes, walking_steps
 
 def get_subway_segment_info(stations, strategy=0, citycode='0755'):
     if stations.empty or 'name' not in stations.columns:
@@ -399,8 +338,7 @@ lines_iter = iter(df_lines.iterrows())
 # for i, line in df_lines.iterrows():
 
 #%%
-#! 地铁5号线, 地铁7号线
-
+#! 地铁5号线, 地铁5号线, 地铁7号线
 i, line = next(lines_iter)
 logger.info(f"{line.line_name}")
 line_id = line['line_id']
