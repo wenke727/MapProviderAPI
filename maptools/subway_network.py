@@ -7,7 +7,7 @@ import geopandas as gpd
 from loguru import logger
 from itertools import islice
 
-from cfg import KEY
+from cfg import KEY, DATA_FOLDER
 from provider.direction import get_routes
 from utils.logger import make_logger
 from utils.dataframe import query_dataframe
@@ -16,7 +16,8 @@ logger = make_logger('../cache', 'network', include_timestamp=False)
 
 ROUTE_COLUMNS = ['route', 'seg_id', 'type', 'name', 'departure_stop', 'arrival_stop',  'distance', 'cost']
 DIRECTION_MEMO = {}
-DIRECTION_MEMO_FN = "../data/subway/direction_memo.pkl"
+
+DIRECTION_MEMO_FN = DATA_FOLDER / "direction_memo.pkl"
 DIRECTION_MEMO = load_checkpoint(DIRECTION_MEMO_FN)
 
 #%%
@@ -282,7 +283,7 @@ def _extract_segment_info_from_routes(routes_lst:list):
     
     return df_edges
 
-def get_subway_segment_info(stations, strategy=0, citycode='0755'):
+def get_subway_segment_info(stations, strategy=0, citycode='0755', memo={}):
     if stations.empty or 'name' not in stations.columns:
         logger.error("Invalid stations data")
         return pd.DataFrame()
@@ -293,14 +294,17 @@ def get_subway_segment_info(stations, strategy=0, citycode='0755'):
     for i, (src, dst) in enumerate(
         zip(stations.iloc[[0] * (len(stations) - 1)].itertuples(), 
             stations.iloc[1:].itertuples())):
-        routes, walking_steps = get_routes(src, dst, strategy, citycode)
+        routes, walking_steps = get_routes(src, dst, strategy, citycode, memo=memo)
+
+        # FIXME dataframe empty
+        # logger.debug(f"{src.name} --> {dst.name}")
         routes_lst.append(routes.iloc[[0]])
         walking_lst.append(walking_steps)
         time.sleep(.1)
 
     # first seg
     src, dst = stations.iloc[1], stations.iloc[-1]
-    routes, walking_steps = get_routes(src, dst, strategy, citycode)
+    routes, walking_steps = get_routes(src, dst, strategy, citycode, memo=memo)
     walking_lst.append(walking_steps)
     routes_lst.append(routes.iloc[[0]])
 
@@ -309,7 +313,7 @@ def get_subway_segment_info(stations, strategy=0, citycode='0755'):
     seg_first = df_links[['src', 'src_name']].values
     seg_last = df_links.iloc[[-1]][['dst', 'dst_name']].values
     df_nodes = pd.DataFrame(np.concatenate([seg_first, seg_last], axis=0), columns=['nid', 'name'])
-    assert (df_nodes.name.values == stations.name.values).all
+    assert (df_nodes.name.values == stations.name.values).all(), "check the sequence of station"
     df_nodes = df_nodes.merge(stations.rename(columns={'id': 'bvid'}), on='name').set_index('nid')
     
     logger.info(f"stations: {stations['name'].tolist()}")
@@ -318,8 +322,8 @@ def get_subway_segment_info(stations, strategy=0, citycode='0755'):
 
 
 if __name__ == "__main__":
-    line_fn = '../data/subway/wgs/shenzhen_subway_lines_wgs.geojson'
-    ckpt = '../data/subway/shenzhen_network.ckpt'
+    line_fn = DATA_FOLDER / 'wgs/shenzhen_subway_lines_wgs.geojson'
+    ckpt = DATA_FOLDER / 'shenzhen_network.ckpt'
     ckpt = None
     metro = MetroNetwork(line_fn=line_fn, ckpt=ckpt)
 
@@ -335,20 +339,32 @@ if __name__ == "__main__":
 
 #%%
 lines_iter = iter(df_lines.iterrows())
+
+while True:
+    i, line = next(lines_iter)
+    if line.line_name == "地铁7号线":
+        break
+
 # for i, line in df_lines.iterrows():
+# for i, line in df_lines.iterrows():
+#     if line.line_name == "地铁11号线":
+#         break
 
 #%%
-#! 地铁5号线, 地铁5号线, 地铁7号线
+#! 地铁2号线, 地铁7号线(赤尾 出现两次, 因为 `福邻` 地铁站暂未开通)
+# 存在环线：地铁5号线, 
 i, line = next(lines_iter)
-logger.info(f"{line.line_name}")
+
+logger.info(f"{line['name']}")
 line_id = line['line_id']
 line_name = line['line_name']
 
 stations = query_dataframe(self.df_stations, 'line_id', line_id)
-_edges, _nodes = get_subway_segment_info(stations, strategy=2)
+_edges, _nodes = get_subway_segment_info(stations, strategy=2, memo=DIRECTION_MEMO)
 # metro.add_line(line_id)
 # metro.save_ckpt()
 save_checkpoint(DIRECTION_MEMO, DIRECTION_MEMO_FN)
+assert (_edges.cost > 0).all()
 _edges
 
 # %%

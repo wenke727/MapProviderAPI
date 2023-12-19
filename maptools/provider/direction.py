@@ -15,7 +15,7 @@ def __filter_dataframe_columns(df, cols=ROUTE_COLUMNS):
     
     return df[cols]
 
-def query_transit_directions(src, dst, city1, city2, key, strategy=0, show_fields='cost,navi', multiexport=1, memo={}):
+def query_transit_directions(src, dst, city1, city2, key, strategy=0, show_fields='cost,navi', multiexport=1, memo={}, desc=None):
     """
     高德地图公交路线规划 API 服务地址
 
@@ -46,7 +46,10 @@ def query_transit_directions(src, dst, city1, city2, key, strategy=0, show_field
         'show_fields': show_fields,
         'multiexport': multiexport
     }
-    logger.debug(f"{url}?{'&'.join([f'{k}={v}' for k, v in params.items()])}")
+    _url = f"{url}?{'&'.join([f'{k}={v}' for k, v in params.items()])}"
+    if desc:
+        _url = str(desc) + ': ' + _url
+    logger.debug(_url)
 
     response = requests.get(url, params=params)
     response = json.loads(response.text)
@@ -62,7 +65,6 @@ def parse_transit_directions(data, mode='地铁线路', verbose=False):
             step = {"seg_id": seg_id, 'mode': ",".join(segment.keys())}
             for key, val in segment.items():
                 val = deepcopy(val)
-                # bus
                 if key == 'bus':
                     connector = 'walking_1'
                     if len(val['buslines']) != 1:
@@ -72,14 +74,12 @@ def parse_transit_directions(data, mode='地铁线路', verbose=False):
                             logger.warning(f"Check route {route_id} the buslines length, types: {list(modes)}")
                     line = val['buslines'][0]
                     step.update(line)
-                # walking
                 elif key == 'walking':
                     step[connector] = val
                     step[connector+"_info"] = {
                         "cost": int(val['cost']['duration']), 
                         "distance": int(val['distance'])
                     }
-                # taxi
                 elif key == 'taxi':
                     step.update(val)
             steps.append(step)                    
@@ -174,9 +174,13 @@ def extract_walking_steps_from_routes(routes:pd.DataFrame):
     return walkings[attrs]
 
 def filter_route_by_lineID(routes, src, dst):
-    src_line_id = src.get('line_id')
-    dst_line_id = dst.get('line_id')
-    if src_line_id is None or dst_line_id is None:
+    try:
+        src_line_id = src.line_id
+        dst_line_id = dst.line_id
+        if src_line_id is None or dst_line_id is None:
+            return routes
+    except:
+        logger.warning("(src, dst) don't have `line_id` attribute.")
         return routes
     
     route_ids = None
@@ -190,10 +194,11 @@ def filter_route_by_lineID(routes, src, dst):
     return routes
 
 def get_routes(src:pd.Series, dst:pd.Series, strategy:int, citycode:str='0755', mode:str='地铁线路', memo:dict={}):
+    
     response_data = query_transit_directions(
-        src.location, dst.location, citycode, citycode, KEY, strategy, memo=memo)
+        src.location, dst.location, citycode, citycode, KEY, strategy, memo=memo, desc=f"{src.name} --> {dst.name}")
     routes = parse_transit_directions(response_data, mode=mode)
-    routes.loc[:, 'memo'] = f"{src['name']} --> {dst['name']}"
+    routes.loc[:, 'memo'] = f"{src.name} --> {dst.name}"
     # routes = __filter_dataframe_columns(routes)
     
     routes = filter_route_by_lineID(routes, src, dst)
@@ -204,6 +209,7 @@ def get_routes(src:pd.Series, dst:pd.Series, strategy:int, citycode:str='0755', 
 
 #%%
 if __name__ == "__main__":
+    tets_case = 1
     # 南山 --> 上梅林
     src, dst = [pd.Series({
         'id': 'BV10244676',
@@ -222,39 +228,55 @@ if __name__ == "__main__":
     })]
 
     # 南山 --> 福田 (line 11)
-    # src, dst = [pd.Series({
-    #     'id': 'BV10244676',
-    #     'location': '113.923483,22.524037',
-    #     'name': '南山',
-    #     'sequence': '14',
-    #     'line_id': '440300024057',
-    #     'line_name': '地铁11号线',
-    # }), pd.Series(
-    #     {
-    #     'location': '114.055636,22.539872',
-    #     'name': '福田',
-    #     'sequence': '17',
-    #     'line_id': '440300024057',
-    #     'line_name': '地铁11号线'
-    # })]
+    src, dst = [pd.Series({
+        'id': 'BV10244676',
+        'location': '113.923483,22.524037',
+        'name': '南山',
+        'sequence': '14',
+        'line_id': '440300024057',
+        'line_name': '地铁11号线',
+    }), pd.Series(
+        {
+        'location': '114.055636,22.539872',
+        'name': '福田',
+        'sequence': '17',
+        'line_id': '440300024057',
+        'line_name': '地铁11号线'
+    })]
 
     # 海山 --> 小梅沙
-    # src, dst = [pd.Series({
-    #     'id': 'BV10244749',
-    #     'location': '114.237711,22.555537',
-    #     'name': '海山',
-    #     'sequence': '35',
-    #     'line_id': '440300024076',
-    #     'line_name': '地铁2号线'}),
-    #     pd.Series(
-    #     {'id': 'BV10804214',
-    #     'location': '114.326201,22.601932',
-    #     'name': '小梅沙',
-    #     'sequence': '42',
-    #     'line_id': '440300024076',
-    #     'line_name': '地铁2号线'},
-    # )]
+    src, dst = [pd.Series({
+        'id': 'BV10244749',
+        'location': '114.237711,22.555537',
+        'name': '海山',
+        'sequence': '35',
+        'line_id': '440300024076',
+        'line_name': '地铁2号线'}),
+        pd.Series(
+        {'id': 'BV10804214',
+        'location': '114.326201,22.601932',
+        'name': '小梅沙',
+        'sequence': '42',
+        'line_id': '440300024076',
+        'line_name': '地铁2号线'},
+    )]
     
+    # 西丽湖 --> 福邻
+    src, dst = [
+        pd.Series({'id': 'BV10602481',
+        'location': '113.965648,22.593567',
+        'name': '西丽湖',
+        'sequence': '1',
+        'line_id': '440300024050',
+        'line_name': '地铁7号线'}),
+        pd.Series({'id': 'BV10602480',
+        'location': '114.081263,22.524656',
+        'name': '福邻',
+        'sequence': '17',
+        'line_id': '440300024050',
+        'line_name': '地铁7号线'})
+    ]
+
     citycode = '0755'
     data = query_transit_directions(src.location, dst.location, citycode, citycode, KEY)
 

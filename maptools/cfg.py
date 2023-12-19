@@ -1,6 +1,11 @@
+import os
+from pathlib import Path
 from utils.misc import detect_os
 from utils.memory import create_memory_cache
 
+# Path
+ROOT_FOLDER = Path(os.path.curdir) / '..'
+DATA_FOLDER = ROOT_FOLDER / 'data/subway'
 
 # set `MEMORY`
 OS_NAME = detect_os()
@@ -16,3 +21,4 @@ assert KEY != "", "Config `KEY` first."
 
 # Coordnination System
 LL_SYS = 'wgs'
+
