@@ -7,18 +7,17 @@ import geopandas as gpd
 from loguru import logger
 from itertools import islice
 
-from cfg import KEY, DATA_FOLDER
-from provider.direction import get_routes
+from cfg import KEY, DATA_FOLDER, ROUTE_COLUMNS
+from provider.direction import get_subway_routes
 from utils.logger import make_logger
 from utils.dataframe import query_dataframe
 from utils.serialization import load_checkpoint, save_checkpoint
-logger = make_logger('../cache', 'network', include_timestamp=False)
 
-ROUTE_COLUMNS = ['route', 'seg_id', 'type', 'name', 'departure_stop', 'arrival_stop',  'distance', 'cost']
 DIRECTION_MEMO = {}
-
 DIRECTION_MEMO_FN = DATA_FOLDER / "direction_memo.pkl"
 DIRECTION_MEMO = load_checkpoint(DIRECTION_MEMO_FN)
+
+logger = make_logger(DATA_FOLDER, 'network', include_timestamp=False)
 
 #%%
 
@@ -288,27 +287,27 @@ def get_subway_segment_info(stations, strategy=0, citycode='0755', memo={}):
         logger.error("Invalid stations data")
         return pd.DataFrame()
 
-    routes_lst = []
+    steps_lst = []
     walking_lst = []
     # 1 - n
     for i, (src, dst) in enumerate(
         zip(stations.iloc[[0] * (len(stations) - 1)].itertuples(), 
             stations.iloc[1:].itertuples())):
-        routes, walking_steps = get_routes(src, dst, strategy, citycode, memo=memo)
-
-        # FIXME dataframe empty
-        # logger.debug(f"{src.name} --> {dst.name}")
-        routes_lst.append(routes.iloc[[0]])
+        routes, steps, walking_steps = get_subway_routes(src, dst, strategy, citycode, memo=memo)
+        # if routes.empty:
+            
+        # FIXME 判断 direct 的情况，决定当前节点的状态
+        steps_lst.append(steps.iloc[[0]])
         walking_lst.append(walking_steps)
         time.sleep(.1)
 
     # first seg
     src, dst = stations.iloc[1], stations.iloc[-1]
-    routes, walking_steps = get_routes(src, dst, strategy, citycode, memo=memo)
+    routes, steps, walking_steps = get_subway_routes(src, dst, strategy, citycode, memo=memo)
     walking_lst.append(walking_steps)
-    routes_lst.append(routes.iloc[[0]])
+    steps_lst.append(steps.iloc[[0]])
 
-    df_links = _extract_segment_info_from_routes(routes_lst)
+    df_links = _extract_segment_info_from_routes(steps_lst)
     
     seg_first = df_links[['src', 'src_name']].values
     seg_last = df_links.iloc[[-1]][['dst', 'dst_name']].values
@@ -342,7 +341,7 @@ lines_iter = iter(df_lines.iterrows())
 
 while True:
     i, line = next(lines_iter)
-    if line.line_name == "地铁7号线":
+    if line.line_name == "地铁2号线":
         break
 
 # for i, line in df_lines.iterrows():

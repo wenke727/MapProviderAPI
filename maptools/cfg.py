@@ -4,7 +4,7 @@ from utils.misc import detect_os
 from utils.memory import create_memory_cache
 
 # Path
-ROOT_FOLDER = Path(os.path.curdir) / '..'
+ROOT_FOLDER = Path(os.path.dirname(os.path.abspath(__file__))) / '..'
 DATA_FOLDER = ROOT_FOLDER / 'data/subway'
 
 # set `MEMORY`
@@ -22,3 +22,4 @@ assert KEY != "", "Config `KEY` first."
 # Coordnination System
 LL_SYS = 'wgs'
 
+ROUTE_COLUMNS = ['route', 'seg_id', 'type', 'name', 'departure_stop', 'arrival_stop',  'distance', 'cost']
