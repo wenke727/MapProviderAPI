@@ -79,8 +79,9 @@ def parse_transit_directions(data, mode='地铁线路', verbose=False):
         steps = []
         for seg_id, segment in enumerate(route['segments']):
             connector = 'walking_0'
-            # mode_lst = [i for i in segment.keys() if i != 'walking' else '+' ]
             step = {"seg_id": seg_id, 'mode': "".join(segment.keys()).replace('walking', '+')}
+            
+            modes = []
             for key, val in segment.items():
                 val = deepcopy(val)
                 if key == 'bus':
@@ -92,20 +93,28 @@ def parse_transit_directions(data, mode='地铁线路', verbose=False):
                             logger.warning(f"Check route {route_id} the buslines length, types: {list(modes)}")
                     line = val['buslines'][0]
                     step.update(line)
+                    if line['type'] == '地铁线路':
+                        modes.append('subway')
+                    else:
+                        modes.append('bus')
                 elif key == 'walking':
                     step[connector] = val
                     step[connector+"_info"] = {
                         "cost": int(val['cost']['duration']), 
                         "distance": int(val['distance'])
                     }
+                    modes.append('+')
                 else:
                     logger.debug(val)
                     step.update({key: val})
                     connector = 'walking_1'
+                    modes.append(key)
+                    
+            step['mode'] = "".join(modes)
             steps.append(step)                    
 
         steps = pd.DataFrame(steps)
-        steps.loc[steps.type == '地铁线路', 'mode'] = 'subway'
+        # steps.loc[steps.type == '地铁线路', 'mode'] = 'subway'
         status, steps = _filter_first_and_last_walking_steps(steps)
         steps.loc[:, 'route'] = i
 
@@ -228,8 +237,9 @@ def get_subway_routes(src:pd.Series, dst:pd.Series, strategy:int,
     logger.debug(f"\n{routes}")
     # routes = __filter_dataframe_columns(routes)
     
-    steps = filter_route_by_lineID(steps, src, dst)
     walkings = extract_walking_steps_from_routes(steps)
+    # steps = filter_route_by_lineID(steps, src, dst)
+    steps.set_index('route', inplace=True)
     # routes = routes.loc[steps.route.values]
     
     return routes, steps, walkings
@@ -290,20 +300,20 @@ if __name__ == "__main__":
     # )]
     
     # 西丽湖 --> 福邻
-    src, dst = [
-        pd.Series({'id': 'BV10602481',
-        'location': '113.965648,22.593567',
-        'name': '西丽湖',
-        'sequence': '1',
-        'line_id': '440300024050',
-        'line_name': '地铁7号线'}),
-        pd.Series({'id': 'BV10602480',
-        'location': '114.081263,22.524656',
-        'name': '福邻',
-        'sequence': '17',
-        'line_id': '440300024050',
-        'line_name': '地铁7号线'})
-    ]
+    # src, dst = [
+    #     pd.Series({'id': 'BV10602481',
+    #     'location': '113.965648,22.593567',
+    #     'name': '西丽湖',
+    #     'sequence': '1',
+    #     'line_id': '440300024050',
+    #     'line_name': '地铁7号线'}),
+    #     pd.Series({'id': 'BV10602480',
+    #     'location': '114.081263,22.524656',
+    #     'name': '福邻',
+    #     'sequence': '17',
+    #     'line_id': '440300024050',
+    #     'line_name': '地铁7号线'})
+    # ]
 
     """ Pipeline """
     # FIXME 还需要判断 起点、终点 是否就是查询节点
