@@ -88,9 +88,9 @@ def parse_transit_directions(data, mode='地铁线路', verbose=False):
                     connector = 'walking_1'
                     if len(val['buslines']) != 1:
                          # 针对公交场景，存在2条或以上的公交车共线的情况，但就地铁而言不存在此情况
-                        modes = np.unique([item['type'] for item in val['buslines']])
+                        bus_modes = np.unique([item['type'] for item in val['buslines']])
                         if len(modes) > 1:
-                            logger.warning(f"Check route {route_id} the buslines length, types: {list(modes)}")
+                            logger.warning(f"Check route {route_id} the buslines length, types: {list(bus_modes)}")
                     line = val['buslines'][0]
                     step.update(line)
                     if line['type'] == '地铁线路':
@@ -247,7 +247,7 @@ def get_subway_routes(src:pd.Series, dst:pd.Series, strategy:int,
 
 #%%
 if __name__ == "__main__":
-    tets_case = 1
+    tets_cases = []
     # 南山 --> 上梅林
     src, dst = [pd.Series({
         'id': 'BV10244676',
@@ -264,59 +264,64 @@ if __name__ == "__main__":
         'line_id': '440300024075',
         'line_name': '地铁4号线'
     })]
+    tets_cases.append([src, dst])
 
     # 南山 --> 福田 (line 11)
-    # src, dst = [pd.Series({
-    #     'id': 'BV10244676',
-    #     'location': '113.923483,22.524037',
-    #     'name': '南山',
-    #     'sequence': '14',
-    #     'line_id': '440300024057',
-    #     'line_name': '地铁11号线',
-    # }), pd.Series(
-    #     {
-    #     'location': '114.055636,22.539872',
-    #     'name': '福田',
-    #     'sequence': '17',
-    #     'line_id': '440300024057',
-    #     'line_name': '地铁11号线'
-    # })]
+    src, dst = [pd.Series({
+        'id': 'BV10244676',
+        'location': '113.923483,22.524037',
+        'name': '南山',
+        'sequence': '14',
+        'line_id': '440300024057',
+        'line_name': '地铁11号线',
+    }), pd.Series(
+        {
+        'location': '114.055636,22.539872',
+        'name': '福田',
+        'sequence': '17',
+        'line_id': '440300024057',
+        'line_name': '地铁11号线'
+    })]
+    tets_cases.append([src, dst])
 
     # 海山 --> 小梅沙
-    # src, dst = [pd.Series({
-    #     'id': 'BV10244749',
-    #     'location': '114.237711,22.555537',
-    #     'name': '海山',
-    #     'sequence': '35',
-    #     'line_id': '440300024076',
-    #     'line_name': '地铁2号线'}),
-    #     pd.Series(
-    #     {'id': 'BV10804214',
-    #     'location': '114.326201,22.601932',
-    #     'name': '小梅沙',
-    #     'sequence': '42',
-    #     'line_id': '440300024076',
-    #     'line_name': '地铁2号线'},
-    # )]
+    src, dst = [pd.Series({
+        'id': 'BV10244749',
+        'location': '114.237711,22.555537',
+        'name': '海山',
+        'sequence': '35',
+        'line_id': '440300024076',
+        'line_name': '地铁2号线'}),
+        pd.Series(
+        {'id': 'BV10804214',
+        'location': '114.326201,22.601932',
+        'name': '小梅沙',
+        'sequence': '42',
+        'line_id': '440300024076',
+        'line_name': '地铁2号线'},
+    )]
+    tets_cases.append([src, dst])
     
     # 西丽湖 --> 福邻
-    # src, dst = [
-    #     pd.Series({'id': 'BV10602481',
-    #     'location': '113.965648,22.593567',
-    #     'name': '西丽湖',
-    #     'sequence': '1',
-    #     'line_id': '440300024050',
-    #     'line_name': '地铁7号线'}),
-    #     pd.Series({'id': 'BV10602480',
-    #     'location': '114.081263,22.524656',
-    #     'name': '福邻',
-    #     'sequence': '17',
-    #     'line_id': '440300024050',
-    #     'line_name': '地铁7号线'})
-    # ]
+    src, dst = [
+        pd.Series({'id': 'BV10602481',
+        'location': '113.965648,22.593567',
+        'name': '西丽湖',
+        'sequence': '1',
+        'line_id': '440300024050',
+        'line_name': '地铁7号线'}),
+        pd.Series({'id': 'BV10602480',
+        'location': '114.081263,22.524656',
+        'name': '福邻',
+        'sequence': '17',
+        'line_id': '440300024050',
+        'line_name': '地铁7号线'})
+    ]
+    tets_cases.append([src, dst])
 
     """ Pipeline """
     # FIXME 还需要判断 起点、终点 是否就是查询节点
+    src, dst = tets_cases[0]
     routes, steps, walkings = get_subway_routes(src, dst, strategy=0)
     # steps = __filter_dataframe_columns(steps)
 
