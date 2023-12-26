@@ -1,97 +1,76 @@
 # %%
-from geo.distance import cal_pointwise_distance_geoseries as cal_distance
-import pandas as pd
 import numpy as np
-import sys
+import pandas as pd
 import geopandas as gpd
 from shapely import Point
+from geo.distance import cal_pointwise_distance_geoseries as cal_distance
 
 records = gpd.read_file("../data/cells/traj_00011.geojson")
 records.geometry = records.geometry.fillna(Point())
-records.lac = records.lac.fillna(-1)
+records.lac = records.lac.fillna(-1).astype(int)
 records.duration = records.duration.fillna(0)
 records.loc[:, 'rid'] = 1
 
 records.loc[80:90]
 
-# %%
-
 
 # %%
+import networkx as nx
+import geopandas as gpd
+import matplotlib.pyplot as plt
 
-def traj_clean_drift(data, col=['rid', 'dt', 'geometry'],
-                     method='twoside',
-                     speedlimit=None,
-                     dislimit=5000,
-                     anglelimit=30):
-    [Rid, Time, Geometry] = col
-    df = data.copy()
-    df = df.drop_duplicates(subset=[Rid, Time])
-    df = df.sort_values(by=[Rid, Time])
+class CellGraphBuilder:
+    def __init__(self, geo_df=None):
+        self.graph = nx.DiGraph()
+        self.coordinates = {}  # Dictionary to store coordinates
+        if geo_df is not None:
+            self.update_graph(geo_df)
 
-    # 计算前后点距离、时间差、速度
-    for i in [Rid, Geometry, Time]:
-        df[i + '_pre'] = df[i].shift()
-        df[i + '_next'] = df[i].shift(-1)
+    def _extract_cell_data(self, geo_df):
+        return [(row['lac'], row['cid']) for _, row in geo_df.iterrows()]
 
-    df['dis_pre'] = cal_distance(df[Geometry], df[Geometry + '_pre'])
-    df['dis_next'] = cal_distance(df[Geometry], df[Geometry + '_next'])
-    df['dis_prenext'] = cal_distance(df[Geometry + '_pre'], df[Geometry + '_next'])
+    def update_graph(self, geo_df):
+        """
+        Updates the graph with new GeoDataFrame data.
+        :param geo_df: New GeoDataFrame to update the graph.
+        """
+        cell_data = self._extract_cell_data(geo_df)
 
-    prev_cond = (df[Rid + '_pre'] == df[Rid])
-    next_cond = (df[Rid + '_next'] == df[Rid])
+        for i in range(len(cell_data) - 1):
+            source = cell_data[i]
+            target = cell_data[i + 1]
 
-    # 以速度限制删除异常点
-    if speedlimit:
-        # 计算前后点时间差
-        df['timegap_pre'] = df[Time + ''] - df[Time + '_pre']
-        df['timegap_next'] = df[Time + '_next'] - df[Time + '']
-        df['timegap_prenext'] = df[Time + '_next'] - df[Time + '_pre']
+            if self.graph.has_edge(source, target):
+                self.graph[source][target]['weight'] += 1
+            else:
+                self.graph.add_edge(source, target, weight=1)
 
-        # 计算前后点速度
-        df['speed_pre'] = df['dis_pre'] / df['timegap_pre'] * 3.6
-        df['speed_next'] = df['dis_next'] / df['timegap_next'] * 3.6
-        df['speed_prenext'] = df['dis_prenext'] / df['timegap_prenext'] * 3.6
-        if method == 'oneside':
-            df = df[-(prev_cond & (df['speed_pre'] > speedlimit))]
-        elif method == 'twoside':
-            df = df[
-                -(prev_cond & next_cond &
-                    (df['speed_pre'] > speedlimit) &
-                    (df['speed_next'] > speedlimit) &
-                    (df['speed_prenext'] < speedlimit))]
+    def get_graph(self):
+        return self.graph
 
-    # 以距离限制删除异常点
-    if dislimit:
-        if method == 'oneside':
-            df = df[
-                -(prev_cond &
-                  (df['dis_pre'] > dislimit))]
-        elif method == 'twoside':
-            df = df[
-                -(prev_cond & next_cond &
-                    (df['dis_pre'] > dislimit) &
-                    (df['dis_next'] > dislimit) &
-                    (df['dis_prenext'] < dislimit))]
+    def visualize_graph(self):
+        pos = nx.spring_layout(self.graph)
 
-    # 以角度限制删除异常点
-    if anglelimit:
-        # 余弦定理计算夹角
-        angle_cos = (df['dis_pre'] ** 2+df['dis_next'] ** 2 -
-                    df['dis_prenext'] **2 ) / (2 * df['dis_pre'] * df['dis_next'])
-        angle_cos = np.maximum(np.minimum(angle_cos, 1), -1)
-        df['angle'] = np.degrees(np.arccos(angle_cos))
+        nx.draw_networkx_nodes(self.graph, pos, alpha=.1)
+        nx.draw_networkx_edges(self.graph, pos, width=[data['weight'] for _, _, data in self.graph.edges(data=True)])
+        # nx.draw_networkx_labels(self.graph, pos, font_size=10, font_family="sans-serif")
 
-        df = df[-(prev_cond & next_cond & (df['angle'] < anglelimit))]
+        plt.axis('off')
+        plt.show()
 
-    # df = df[data.columns]
-    return df
+# Example usage:
+builder = CellGraphBuilder()
+builder.update_graph(records)
+builder.visualize_graph()
 
-
-_records = traj_clean_drift(records)
-_records
 
 # %%
+records.plot()
+
+# %%
+edges = pd.DataFrame(builder.graph.edges(data=True), columns=['src', 'dst', 'attrs'])
+edges = edges.assign(weight = edges['attrs'].apply(lambda x: x['weight'])) 
+edges.sort_values('weight')
 
 
 # %%

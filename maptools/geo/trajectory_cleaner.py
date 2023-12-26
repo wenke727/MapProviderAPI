@@ -2,110 +2,92 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 
-from geo.distance import cal_pointwise_distance_geoseries
+from geo.distance import cal_pointwise_distance_geoseries as cal_distance
 
-def traj_clean_drift(data, col=['VehicleNum', 'Time', 'Lng', 'Lat'],
+
+def calculate_angle_between_sides(adjacent_side1, adjacent_side2, opposite_side):
+    """
+    根据相邻两边和对边长度计算夹角（以度为单位）, 余弦定理计算夹角。
+
+    参数:
+    adjacent_side1 (array-like): 第一条相邻边的长度。
+    adjacent_side2 (array-like): 第二条相邻边的长度。
+    opposite_side (array-like): 对边的长度。
+
+    返回:
+    angles (array-like): 计算出的夹角值（以度为单位）。
+    """
+    # 使用余弦定理计算夹角的余弦值
+    angle_cos = (adjacent_side1 ** 2 + adjacent_side2 ** 2 - opposite_side ** 2) / (2 * adjacent_side1 * adjacent_side2)
+    angle_cos = np.clip(angle_cos, -1, 1)  # 确保值在[-1, 1]范围内
+
+    # 计算夹角并转换为度
+    angles = np.degrees(np.arccos(angle_cos))
+
+    return angles
+
+def traj_clean_drift(data, col=['rid', 'dt', 'geometry'],
                      method='twoside',
-                     speedlimit=80,
-                     dislimit=1000,
+                     speedlimit=None,
+                     dislimit=5000,
                      anglelimit=30):
-    '''
-    Delete the drift in the trajectory data. The drift is defined as the data with a speed greater than the speed limit or the distance between the current point and the next point is greater than the distance limit or the angle between the current point, the previous point, and the next point is smaller than the angle limit. The speed limit is 80km/h by default, and the distance limit is 1000m by default. The method of cleaning drift data is divided into two methods: ‘oneside’ and ‘twoside’. The ‘oneside’ method is to consider the speed of the current point and the next point, and the ‘twoside’ method is to consider the speed of the current point, the previous point, and the next point.
+    [Rid, Time, Geometry] = col
+    df = data.copy()
+    df = df.drop_duplicates(subset=[Rid, Time])
+    df = df.sort_values(by=[Rid, Time])
 
-    Parameters
-    -------
-    data : DataFrame
-        Data
-    col : List
-        Column names, in the order of [‘VehicleNum’, ‘Time’, ‘Lng’, ‘Lat’]
-    method : string
-        Method of cleaning drift data, including ‘oneside’ and ‘twoside’
-    speedlimit : number
-        Speed limitation
-    dislimit : number
-        Distance limit
-    anglelimit : number
-        Angle limit
+    # 计算前后点距离、时间差、速度
+    for i in [Rid, Geometry, Time]:
+        df[i + '_pre'] = df[i].shift()
+        df[i + '_next'] = df[i].shift(-1)
 
-    Returns
-    -------
-    data1 : DataFrame
-        Cleaned data
-    '''
-    [VehicleNum, Time, Lng, Lat] = col
-    data1 = data.copy()
-    data1 = data1.drop_duplicates(subset=[VehicleNum, Time])
-    data1[Time+'_dt'] = pd.to_datetime(data1[Time])
-    data1 = data1.sort_values(by=[VehicleNum, Time])
+    # TODO: 转换
+    df['dis_pre'] = cal_distance(df[Geometry], df[Geometry + '_pre'])
+    df['dis_next'] = cal_distance(df[Geometry], df[Geometry + '_next'])
+    df['dis_prenext'] = cal_distance(df[Geometry + '_pre'], df[Geometry + '_next'])
 
-    #计算前后点距离、时间差、速度
-    for i in [VehicleNum, Lng, Lat, Time+'_dt']:
-        data1[i+'_pre'] = data1[i].shift()
-        data1[i+'_next'] = data1[i].shift(-1)
+    oneside_mask = (df[Rid + '_pre'] == df[Rid])
+    twoside_mask = oneside_mask & (df[Rid + '_next'] == df[Rid])
 
-    data1['dis_pre'] = getdistance(
-        data1[Lng],
-        data1[Lat],
-        data1[Lng+'_pre'],
-        data1[Lat+'_pre'])
-    data1['dis_next'] = getdistance(
-        data1[Lng],
-        data1[Lat],
-        data1[Lng+'_next'],
-        data1[Lat+'_next'])
-    data1['dis_prenext'] = getdistance(
-        data1[Lng+'_pre'],
-        data1[Lat+'_pre'],
-        data1[Lng+'_next'],
-        data1[Lat+'_next'])
-    
-    #计算前后点时间差
-    data1['timegap_pre'] = data1[Time+'_dt'] - data1[Time+'_dt_pre']
-    data1['timegap_next'] = data1[Time+'_dt_next'] - data1[Time+'_dt']
-    data1['timegap_prenext'] = data1[Time+'_dt_next'] - data1[Time+'_dt_pre']
-
-    #计算前后点速度
-    data1['speed_pre'] = data1['dis_pre'] /  data1['timegap_pre'].dt.total_seconds()*3.6
-    data1['speed_next'] = data1['dis_next'] / data1['timegap_next'].dt.total_seconds()*3.6
-    data1['speed_prenext'] = data1['dis_prenext'] / data1['timegap_prenext'].dt.total_seconds()*3.6
-
-    #余弦定理计算夹角
-    angle_cos = (data1['dis_pre']**2+data1['dis_next']**2-data1['dis_prenext']**2)/(2*data1['dis_pre']*data1['dis_next'])
-    angle_cos = np.maximum(np.minimum(angle_cos, 1), -1)
-    data1['angle'] = np.degrees(np.arccos(angle_cos))
-
-    #以速度限制删除异常点
     if speedlimit:
+        df['timegap_pre'] = df[Time] - df[Time + '_pre']
+        df['timegap_next'] = df[Time + '_next'] - df[Time]
+        df['timegap_prenext'] = df[Time + '_next'] - df[Time + '_pre']
+
+        df['speed_pre'] = df['dis_pre'] / df['timegap_pre'] * 3.6
+        df['speed_next'] = df['dis_next'] / df['timegap_next'] * 3.6
+        df['speed_prenext'] = df['dis_prenext'] / df['timegap_prenext'] * 3.6
+        
         if method == 'oneside':
-            data1 = data1[
-                -((data1[VehicleNum+'_pre'] == data1[VehicleNum]) &
-                  (data1['speed_pre'] > speedlimit))]
+            df = df[-(oneside_mask & (df['speed_pre'] > speedlimit))]
         elif method == 'twoside':
-            data1 = data1[
-                -((data1[VehicleNum+'_pre'] == data1[VehicleNum]) &
-                  (data1[VehicleNum+'_next'] == data1[VehicleNum]) &
-                    (data1['speed_pre'] > speedlimit) &
-                    (data1['speed_next'] > speedlimit) &
-                    (data1['speed_prenext'] < speedlimit))]
-    #以距离限制删除异常点
+            df = df[
+                -(twoside_mask &
+                    (df['speed_pre'] > speedlimit) &
+                    (df['speed_next'] > speedlimit) &
+                    (df['speed_prenext'] < speedlimit))]
+
     if dislimit:
         if method == 'oneside':
-            data1 = data1[
-                -((data1[VehicleNum+'_pre'] == data1[VehicleNum]) &
-                  (data1['dis_pre'] > dislimit))]
+            df = df[
+                -(oneside_mask &
+                  (df['dis_pre'] > dislimit))]
         elif method == 'twoside':
-            data1 = data1[
-                -((data1[VehicleNum+'_pre'] == data1[VehicleNum]) &
-                  (data1[VehicleNum+'_next'] == data1[VehicleNum]) &
-                    (data1['dis_pre'] > dislimit) &
-                    (data1['dis_next'] > dislimit) &
-                    (data1['dis_prenext'] < dislimit))]
-    #以角度限制删除异常点
-    if anglelimit:
-        data1 = data1[
-            -((data1[VehicleNum+'_pre'] == data1[VehicleNum]) &
-              (data1[VehicleNum+'_next'] == data1[VehicleNum]) &
-                (data1['angle'] < anglelimit))]
-    data1 = data1[data.columns]
-    return data1
+            df = df[
+                -(twoside_mask &
+                    (df['dis_pre'] > dislimit) &
+                    (df['dis_next'] > dislimit) &
+                    (df['dis_prenext'] < dislimit))]
 
+    if anglelimit:
+        df['angle'] = calculate_angle_between_sides(df['dis_pre'], df['dis_next'], df['dis_prenext'])
+        df = df[-(twoside_mask & (df['angle'] < anglelimit))]
+
+    # df = df[data.columns]
+    return df
+
+
+if __name__ == "__main__":
+    _records = traj_clean_drift(records)
+    _records
+    

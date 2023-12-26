@@ -67,6 +67,7 @@ def cal_distance_matrix_geoseries(points1, points2, align=True):
     
     return pd.DataFrame(distance_matrix, index=points1.index, columns=points2.index)
 
+
 if __name__ == "__main__":
     # matrix = haversine_matrix(traj_points, points_, xy=True)
     

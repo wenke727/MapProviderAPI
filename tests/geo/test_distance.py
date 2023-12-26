@@ -1,9 +1,9 @@
+import pytest
 import numpy as np
 import geopandas as gpd
 from shapely import Point
 
-from ..distance import cal_distance_matrix_geoseries
-import pytest
+from maptools.geo.distance import cal_distance_matrix_geoseries
 
 
 def test_cal_distance_matrix_geoseries():

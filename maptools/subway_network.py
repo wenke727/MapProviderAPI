@@ -79,16 +79,6 @@ def filter_dataframe_columns(df, cols=ROUTE_COLUMNS):
     
     return df[cols]
 
-def query_transit_by_pinyin(src, dst, df_stations, strategy=0, route_type=None):
-    """ 通过中文的`起点站名`和`终点站名`查询线路 """
-    start = df_stations.query(f"name == '{src}'")
-    end = df_stations.query(f"name == '{dst}'")
-
-    response_text = query_transit_directions(start.location, end.location, '0755', '0755', KEY, strategy, memo=DIRECTION_MEMO)
-    commute = parse_transit_directions(response_text, route_type)
-    
-    return commute
-
 
 class MetroNetwork:
     def __init__(self, line_fn, ckpt=None, refresh=True):
