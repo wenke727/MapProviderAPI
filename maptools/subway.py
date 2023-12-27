@@ -8,7 +8,7 @@ import geopandas as gpd
 from loguru import logger
 from pathlib import Path
 
-from utils.vis import plot_geodata
+from geo.visualize import plot_geodata
 from utils.misc import read_json_file
 from utils.logger import make_logger
 from utils.serialization import save_checkpoint, load_checkpoint, to_geojson

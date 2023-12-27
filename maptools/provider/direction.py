@@ -118,8 +118,9 @@ def parse_transit_directions(data, mode='地铁线路', verbose=False):
         status, steps = _filter_first_and_last_walking_steps(steps)
         steps.loc[:, 'route'] = i
 
-        del route['segments']
         route = pd.DataFrame([{'route': i, "mode": steps['mode'].values, **status, **route}])
+        if 'segments' in list(route):
+            route.drop(columns=['segments'], inplace=True)
         
         return route, steps
 
@@ -135,9 +136,6 @@ def parse_transit_directions(data, mode='地铁线路', verbose=False):
     route_lst = []
     for i, direction in enumerate(transits, start=0):
         route, steps = _extract_data_from_direction(direction, i)
-        # if mode is not None and mode not in steps['type'].unique():
-        #     continue
-        
         step_lst.append(steps)
         route_lst.append(route)
     
@@ -198,46 +196,62 @@ def extract_walking_steps_from_routes(routes:pd.DataFrame):
     walkings.drop_duplicates(['src_id', 'dst_id', 'src_loc'], inplace=True)
 
     attrs = list(walkings)
-    attrs.remove('cost')
-    attrs.remove('distance')
-    attrs += ['cost', 'distance']
+    if 'cost' in attrs:
+        attrs.remove('cost')
+        attrs += ['cost']
+    if 'distance' in attrs:
+        attrs.remove('distance')
+        attrs += ['distance']
 
     return walkings[attrs]
 
-def filter_route_by_lineID(routes, src, dst):
+def filter_route_by_lineID(steps, src, dst):
+    o = steps.iloc[0].departure_stop
+    d = steps.iloc[-1].arrival_stop
+    
     try:
         src_line_id = src.line_id
         dst_line_id = dst.line_id
+        src_name = src['name']
+        dst_name = dst['name']
         if src_line_id is None or dst_line_id is None:
-            return routes
+            return steps
     except:
         logger.warning("(src, dst) don't have `line_id` attribute.")
-        return routes
+        return steps
     
-    route_ids = None
-    waylines = routes.groupby('route').line_id.apply(list)
+    waylines = steps.groupby('route').line_id.apply(list)
+    stops = steps.groupby('route').agg({
+        'departure_stop': lambda x: list(x)[0].get('name'), 
+        'arrival_stop': lambda x: list(x)[-1].get('name')})
     
     src_cond = waylines.apply(lambda x: x[0] == src_line_id)
     dst_cond = waylines.apply(lambda x: x[-1] == dst_line_id)
-    cond = src_cond & dst_cond
-    route_ids = waylines[cond].index
+    src_name_cond = src_name == stops.departure_stop
+    dst_name_cond = dst_name == stops.arrival_stop
+        
+    cond = src_cond & dst_cond & src_name_cond & dst_name_cond
+    # route_ids = waylines[cond].index
             
-    if route_ids is not None:
-        return routes.query("route in @route_ids")
+    # if route_ids is not None:
+    #     return steps.query("route in @route_ids")
 
-    return routes
+    return cond
 
-def get_subway_routes(src:pd.Series, dst:pd.Series, strategy:int, 
+def get_subway_routes(src:pd.Series, dst:pd.Series, strategy:int=2, 
                       citycode:str='0755', mode:str='地铁线路', memo:dict={}):
-    desc = f"{src.name} --> {dst.name}"
+    desc = f"{src['name']} --> {dst['name']}"
     response_data = query_transit_directions(
         src.location, dst.location, citycode, citycode, KEY, strategy, memo=memo, desc=desc)
     routes, steps = parse_transit_directions(response_data, mode=mode)
     routes.loc[:, 'memo'] = desc
-    logger.debug(f"\n{routes}")
+    # logger.debug(f"\n{routes}")
     # routes = __filter_dataframe_columns(routes)
     
     walkings = extract_walking_steps_from_routes(steps)
+    # same_stops = filter_route_by_lineID(steps)
+    routes = routes.assign(stop_check=filter_route_by_lineID(steps, src, dst))
+    
     # steps = filter_route_by_lineID(steps, src, dst)
     steps.set_index('route', inplace=True)
     # routes = routes.loc[steps.route.values]

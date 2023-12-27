@@ -5,13 +5,13 @@ import geopandas as gpd
 from shapely import Point
 from geo.distance import cal_pointwise_distance_geoseries as cal_distance
 
-records = gpd.read_file("../data/cells/traj_00011.geojson")
+fn = "../data/cells/traj_00011.geojson"
+fn = '../data/cells/traj_00002.geojson'
+records = gpd.read_file(fn)
 records.geometry = records.geometry.fillna(Point())
 records.lac = records.lac.fillna(-1).astype(int)
 records.duration = records.duration.fillna(0)
 records.loc[:, 'rid'] = 1
-
-records.loc[80:90]
 
 
 # %%
