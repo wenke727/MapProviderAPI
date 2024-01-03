@@ -5,27 +5,34 @@ import pandas as pd
 import networkx as nx
 import geopandas as gpd
 from loguru import logger
+import shapely
+from shapely.geometry import MultiPoint
+from collections import defaultdict
 
 from cfg import KEY, DATA_FOLDER, ROUTE_COLUMNS, EXP_FOLDER
 from geo.network import Network
+from geo.coords_utils import str_to_point
 from provider.direction import get_subway_routes
 from utils.logger import make_logger
 from utils.dataframe import query_dataframe
 from utils.dataframe import filter_dataframe_columns
-from utils.serialization import load_checkpoint, save_checkpoint
+from utils.serialization import load_checkpoint, save_checkpoint, to_geojson
 
 DIRECTION_MEMO = {}
 DIRECTION_MEMO_FN = DATA_FOLDER / "direction_memo.pkl"
 DIRECTION_MEMO = load_checkpoint(DIRECTION_MEMO_FN)
 
+CITYCODE = '0755'
 UNAVAILABEL_STATIONS = set([])
+# 默认换乘花销，即：起点和终点经纬度一致的时候
+DEFAULT_TRANSFER_COST = {'cost': 60, 'distance': 100}
 
 logger = make_logger(DATA_FOLDER, 'network', include_timestamp=False)
 
 #%%
 
 """ 辅助函数 """
-def _split_line_name(series):
+def _split_subway_line_name(series):
     """
     Splits a pandas Series containing metro line data into three parts: Line Name, Alias, and Direction.
 
@@ -48,7 +55,7 @@ def _load_subway_lines(line_fn):
         logger.warning(f"Unavailabel lines: {unavailabel_line}")
         df_lines.query('status == 1', inplace=True)
 
-    names = _split_line_name(df_lines.name)
+    names = _split_subway_line_name(df_lines.name)
     df_lines = pd.concat([names, df_lines], axis=1)
     
     return df_lines
@@ -75,6 +82,111 @@ def _get_exchange_station_names(df_stations):
     
     return tmp.sort_values(['num', 'link'], ascending=False)
 
+def split_linestring_by_stations(line_id, df_lines, df_stations):
+    """split subway linestring into segments."""
+    line = df_lines.query(f"line_id == '{line_id}'")
+    pts = df_stations.query(f"line_id == '{line_id}'")
+    station_names = pts['name'].values
+    pts = gpd.GeoDataFrame(pts, geometry=pts.location.apply(lambda x: str_to_point(x, 'wgs')), crs=4326)
+
+    geoms = shapely.ops.split(
+        line.iloc[0]['geometry'],
+        shapely.MultiPoint(pts.geometry.values)
+    )
+    geoms = list(geoms.geoms)
+    assert len(geoms) == len(pts) - 1
+    
+    segs = gpd.GeoDataFrame(
+        {'line_id': line_id, 'src_name': station_names[:-1], 'dst_name': station_names[1:]}, 
+        geometry=geoms, crs=4326)
+    
+    return segs
+
+def _extract_segment_info_from_routes(routes_lst:list):
+    df_segs = pd.concat(routes_lst)
+    df_segs['cost'] = df_segs['cost'].astype(int)
+    df_segs['distance'] = df_segs['distance'].astype(int)
+
+    _len = df_segs.shape[0]
+    edges = []
+    for i in range(1, _len):
+        prev, cur = df_segs.iloc[i-1], df_segs.iloc[i]
+        if i < _len - 1:
+            edges.append({
+                'src': prev.arrival_stop['id'],
+                'dst': cur.arrival_stop['id'],
+                'src_name': prev.arrival_stop['name'], 
+                'dst_name': cur.arrival_stop['name'],
+                'distance': cur.distance - prev.distance,
+                'cost': cur.cost - prev.cost,
+            })
+        else:
+            edges = [{
+                'src': prev.departure_stop['id'],
+                'dst': cur.departure_stop['id'],
+                'src_name': prev.departure_stop['name'], 
+                'dst_name': cur.departure_stop['name'],
+                'distance': - cur.distance + prev.distance,  
+                'cost': - cur.cost + prev.cost,
+            }] + edges
+        
+    df_edges = pd.DataFrame(edges)
+    
+    return df_edges
+
+def get_subway_segment_info(stations, strategy=0, citycode=CITYCODE, memo={}, sleep_dt=.2, auto_save=True):
+    if stations.empty or 'name' not in stations.columns:
+        logger.error("Invalid stations data")
+        return pd.DataFrame()
+
+    routes_lst = []
+    steps_lst = []
+    walking_lst = []
+    unavailabel_stops = []
+    def __helper(src, dst):
+        routes, steps, walking_steps = get_subway_routes(src, dst, strategy, citycode, memo=memo)
+        routes.query("stop_check == True", inplace=True)
+        if sleep_dt: time.sleep(sleep_dt)
+        
+        if routes.empty:
+            logger.warning(f"unavailabel stop: {dst['name']}")
+            unavailabel_stops.append(dst['name'])
+            UNAVAILABEL_STATIONS.add((dst['line_id'], dst['name']))
+            return [None] * 4
+        
+        idx = routes.index.values[0]
+        routes_lst.append(routes)
+        steps_lst.append(steps.loc[[idx]])
+        walking_lst.append(walking_steps)    
+
+    # segs: 1 - n
+    src = stations.iloc[0]
+    for i in range(1, len(stations)):
+        __helper(src, stations.iloc[i])
+    # segs: 0
+    __helper(stations.iloc[1], stations.iloc[-1])
+    if auto_save:
+        save_checkpoint(DIRECTION_MEMO, DIRECTION_MEMO_FN)
+
+    # stations
+    if len(unavailabel_stops):
+        stations.query("name not in @unavailabel_stops", inplace=True)
+
+    df_links = _extract_segment_info_from_routes(steps_lst)
+    seg_first = df_links[['src', 'src_name']].values
+    seg_last = df_links.iloc[[-1]][['dst', 'dst_name']].values
+    df_nodes = pd.DataFrame(np.concatenate([seg_first, seg_last], axis=0), columns=['nid', 'name'])
+    assert (df_nodes.name.values == stations.name.values).all(), logger.warning("check the sequence of station")
+    df_nodes = df_nodes.merge(stations.rename(columns={'id': 'bvid'}), on='name').set_index('nid')
+    
+    df_routes = pd.concat(routes_lst)
+    df_steps = pd.concat(steps_lst)
+    logger.debug(f"stations: {stations['name'].tolist()}")
+    
+    
+    return df_routes, df_steps, df_links, df_nodes
+
+
 
 class MetroNetwork(Network):
     def __init__(self, line_fn, ckpt=None, refresh=True):
@@ -84,20 +196,6 @@ class MetroNetwork(Network):
         # lines
         self.df_lines = _load_subway_lines(line_fn)
         self.df_stations = _extract_stations_from_lines(self.df_lines)
-
-    # FIXME
-    def add_line(self, line_id, strategy=2):
-        """ 获取某一条线路的信息 """
-        if line_id in self.visited_lines:
-            return
-        
-        stations = query_dataframe(self.df_stations, 'line_id', line_id)
-        nodes, edges, directions_res = get_subway_segment_info(stations, strategy=strategy)
-        self.add_nodes(nodes)
-        self.add_edges(edges)
-        self.visited_lines.add(line_id)
-    
-        return nodes, edges, directions_res
 
     def get_exchange_stations(self):
         return _get_exchange_station_names(self.df_stations)
@@ -132,7 +230,7 @@ class MetroNetwork(Network):
         # TODO 获取地铁的发车时间间隔
         pass
 
-    def add_all_lines(self, lines_iter):
+    def add_all_lines(self, sleep_dt=0.2):
         #! 地铁2号线, 地铁7号线(赤尾 出现两次, 因为 `福邻` 地铁站暂未开通)
         # 存在环线：地铁5号线, 
         df_routes_lst = []
@@ -146,14 +244,15 @@ class MetroNetwork(Network):
             
             return df[['name']+atts]
 
-        for i, line in (lines_iter):
+        for i, line in self.df_lines.iterrows():
             # i, line = next(lines_iter)
             logger.info(f"{line['name']}")
             line_id = line['line_id']
             line_name = line['line_name']
 
             stations = query_dataframe(self.df_stations, 'line_id', line_id)
-            df_routes, df_steps, _edges, _nodes = get_subway_segment_info(stations, strategy=2, memo=DIRECTION_MEMO, sleep_dt=0)
+            df_routes, df_steps, _edges, _nodes = get_subway_segment_info(
+                stations, strategy=2, memo=DIRECTION_MEMO, sleep_dt=sleep_dt)
             # save_checkpoint(DIRECTION_MEMO, DIRECTION_MEMO_FN)
             assert (_edges.cost > 0).all()
             
@@ -183,110 +282,14 @@ def check_shortest_path():
     routes = metro.top_k_paths(src, dst, 3, weight='cost')
     nodes.loc[routes[0]]
 
-def print_routes(routes):
-    _routes = filter_dataframe_columns(routes, ROUTE_COLUMNS + ['walking_0_info', 'walking_1_info', 'mode'])
-    str_routes = []
-    for route_id in routes.route.unique():
-        route = _routes.query(f"route == {route_id}").copy()
-        route.departure_stop = route.departure_stop.apply(lambda x: x['name'])
-        route.arrival_stop = route.arrival_stop.apply(lambda x: x['name'])
-        # route.drop(columns=['route'], inplace=True)
-        str_routes.append(f"Route {route_id}:\n{route}")
-
-    pre_states = ""
-    logger.debug(pre_states + "\n" + "\n\n".join(str_routes))
-
-def _extract_segment_info_from_routes(routes_lst:list):
-    df_segs = pd.concat(routes_lst)
-    df_segs['cost'] = df_segs['cost'].astype(int)
-    df_segs['distance'] = df_segs['distance'].astype(int)
-
-    _len = df_segs.shape[0]
-    edges = []
-    for i in range(1, _len):
-        prev, cur = df_segs.iloc[i-1], df_segs.iloc[i]
-        if i < _len - 1:
-            edges.append({
-                'src': prev.arrival_stop['id'],
-                'dst': cur.arrival_stop['id'],
-                'src_name': prev.arrival_stop['name'], 
-                'dst_name': cur.arrival_stop['name'],
-                'distance': cur.distance - prev.distance,
-                'cost': cur.cost - prev.cost,
-            })
-        else:
-            edges = [{
-                'src': prev.departure_stop['id'],
-                'dst': cur.departure_stop['id'],
-                'src_name': prev.departure_stop['name'], 
-                'dst_name': cur.departure_stop['name'],
-                'distance': - cur.distance + prev.distance,  
-                'cost': - cur.cost + prev.cost,
-            }] + edges
-        
-    df_edges = pd.DataFrame(edges)
-    
-    return df_edges
-
-def get_subway_segment_info(stations, strategy=0, citycode='0755', memo={}, sleep_dt=.2):
-    global UNAVAILABEL_STATIONS
-    if stations.empty or 'name' not in stations.columns:
-        logger.error("Invalid stations data")
-        return pd.DataFrame()
-
-    routes_lst = []
-    steps_lst = []
-    walking_lst = []
-    unavailabel_stops = []
-    def __helper(src, dst):
-        routes, steps, walking_steps = get_subway_routes(src, dst, strategy, citycode, memo=memo)
-        routes.query("stop_check == True", inplace=True)
-        if sleep_dt: time.sleep(sleep_dt)
-        
-        if routes.empty:
-            # TODO 增加线路的信息，仅仅靠名字是无法判断的
-            logger.warning(f"unavailabel stop: {dst['name']}")
-            unavailabel_stops.append(dst['name'])
-            return
-        
-        idx = routes.index.values[0]
-        routes_lst.append(routes)
-        steps_lst.append(steps.loc[[idx]])
-        walking_lst.append(walking_steps)    
-
-    # 1 - n
-    src = stations.iloc[0]
-    for i in range(1, len(stations)):
-        dst = stations.iloc[i]
-        __helper(src, dst)
-
-    # first seg
-    __helper(stations.iloc[1], stations.iloc[-1])
-
-    # stations
-    if len(unavailabel_stops):
-        stations.query("name not in @unavailabel_stops", inplace=True)
-
-    df_links = _extract_segment_info_from_routes(steps_lst)
-    seg_first = df_links[['src', 'src_name']].values
-    seg_last = df_links.iloc[[-1]][['dst', 'dst_name']].values
-    df_nodes = pd.DataFrame(np.concatenate([seg_first, seg_last], axis=0), columns=['nid', 'name'])
-    if not (df_nodes.name.values == stations.name.values).all():
-        logger.warning("check the sequence of station")
-    df_nodes = df_nodes.merge(stations.rename(columns={'id': 'bvid'}), on='name').set_index('nid')
-    
-    df_routes = pd.concat(routes_lst)
-    df_steps = pd.concat(steps_lst)
-    logger.debug(f"stations: {stations['name'].tolist()}")
-    
-    return df_routes, df_steps, df_links, df_nodes
-
 
 if __name__ == "__main__":
     line_fn = DATA_FOLDER / 'wgs/shenzhen_subway_lines_wgs.geojson'
     ckpt = DATA_FOLDER / 'shenzhen_network.ckpt'
     ckpt = None
+
     metro = MetroNetwork(line_fn=line_fn, ckpt=ckpt)
+    metro.add_all_lines(sleep_dt=0)
 
     self = metro
     G = metro.graph
@@ -294,63 +297,164 @@ if __name__ == "__main__":
     df_stations = metro.df_stations
 
     
-    lines_iter = iter(df_lines.iterrows())
-    metro.add_all_lines(lines_iter)
+    lines_iter = iter(metro.df_lines.iterrows())
 
     # nodes, edges
     nodes = metro.nodes_to_dataframe()
     edges = metro.edges_to_dataframe()
 
+#%%
+# TODO
+""" 切分线路 """
+
+name_2_idx = nodes.reset_index().set_index(['line_id', 'name'])['index']
+available_srarion_mask = df_stations.apply(lambda x: (x['line_id'], x['name']) not in UNAVAILABEL_STATIONS, axis=1)
+seg_geoms = []
+for line_id in df_lines.line_id.values:
+    segs = split_linestring_by_stations(line_id, df_lines, df_stations[available_srarion_mask])
+    segs.loc[:, 'src'] = segs.apply(lambda x: name_2_idx.get((x.line_id, x.src_name)), axis=1)
+    segs.loc[:, 'dst'] = segs.apply(lambda x: name_2_idx.get((x.line_id, x.dst_name)), axis=1)
+    segs = gpd.GeoDataFrame(segs).set_geometry('geometry')
+    seg_geoms.append(segs)
+    
+seg_geoms = gpd.GeoDataFrame(pd.concat(seg_geoms), crs=4326)
+
+keys = ['src', 'dst']
+seg_geoms.sort_values(keys, inplace=True)
+edges.sort_values(keys, inplace=True)
+
+assert np.allclose(seg_geoms[keys].astype(int), edges[keys].astype(int))
+
+seg_geoms = seg_geoms.merge(edges, on=keys)
+seg_geoms.set_geometry('geometry', inplace=True)
+seg_geoms.set_index(keys)
+
+#%%
+to_geojson(seg_geoms, "../exp/subway_segments")
+
+#%%
+#! 获取换乘站点的连接信息
+exchanges = metro.get_exchange_stations()
+exchanges = exchanges[exchanges.link].reset_index(drop=True)
+name_iter = iter(exchanges.name.values)
 
 # %%
+
+def find_transfer_station_at_same_location(nid, nodes):
+    # 为简单起见，若是 line_name 和 location 一致, 则认为是同站台换乘
+    item = nodes.loc[nid]
+    line_name = item.line_name
+    location = item.location 
+    
+    cands = nodes.query(f"location == @location and line_name == @line_name")
+    cands = cands[cands.index != nid]
+    if cands.empty:
+        return None
+
+    return cands
+
 def get_exchange_link_info(nodes, station_name):
-    #! 如何获取一个换乘站的所有连接
-    station_nodes= query_dataframe(nodes, 'name', station_name)
+    # 如何获取一个换乘站的所有连接
+    def logger_helper(start, end, connectors):
+        if connectors.empty:
+            logger.warning(f"{start['name']}({start['line_name']}) -> {end['name']}({start['line_name']}): empty")
+            return
+            
+        connectors_lst.append(connectors)
+        _len = len(connectors)
+        level='debug'
+        if _len == 0:
+            level = 'warning'
+        elif _len > 1:
+            level = 'info'
+        if level == "debug":
+            return
+        getattr(logger, level)(f"{station_name} 连接线: {start['name']} -> {end['name']} : {_len}")
+        logger.debug(f"\n{connectors}")        
+
+    def get_nid(x):
+        if isinstance(x, list):
+            if len(x) == 0:
+                return None
+            return x[0]
+        else:
+            return x
+        
+    station_nodes = query_dataframe(nodes, 'name', station_name)
     nidxs = np.sort(station_nodes.index)
     logger.debug(f"{station_name}: {nidxs}")
 
-    lst = []
-    for nid in nidxs:
-        lst.append(metro.get_adj_nodes(nid))
-    points = pd.DataFrame(lst)
-    points.loc[:, 'prev'] = points['prev'].apply(lambda x: x[0] if isinstance(x, list) else x)
-    points.loc[:, 'next'] = points['next'].apply(lambda x: x[0] if isinstance(x, list) else x)
+    points = pd.DataFrame([metro.get_adj_nodes(nid) for nid in nidxs])
+    points.loc[:, 'prev'] = points['prev'].apply(get_nid)
+    points.loc[:, 'next'] = points['next'].apply(get_nid)
     points.loc[:, 'line_name'] = points['cur'].apply(lambda x: nodes.loc[x].line_name)
 
-    ods = []
     connectors_lst = []
+    coord_pair_2_ods = defaultdict(set)
     for i, src in enumerate(points.itertuples()):
         for j, dst in enumerate(points.itertuples()):
             if i == j or src.line_name == dst.line_name:
                 continue
-
-            start = nodes.loc[src.prev]
-            end = nodes.loc[dst.next]
-            ods.append([start, end])
-            _, _, connectors = get_subway_routes(start, end, strategy=0, citycode='0755', memo=DIRECTION_MEMO)
-            if connectors.empty:
-                continue
-            connectors.query('src_id in @nidxs and dst_id in @nidxs', inplace=True)
-            connectors_lst.append(connectors)
-            _len = len(connectors)
-            level='debug'
-            if _len == 0:
-                level = 'warning'
-            elif _len > 1:
-                level = 'info'
-            getattr(logger, level)(f"{station_name} 连接线: {start['name']} -> {end['name']} : {_len}")
-            time.sleep(.1)
+            # if nodes.loc[src.cur].location == nodes.loc[dst.cur].location:
+            #     continue
             
-    return pd.DataFrame(ods, columns=['src', 'dst']), pd.concat(connectors_lst)
+            start, end = nodes.loc[src.cur], nodes.loc[dst.cur]
+            coord_pair_2_ods[(start.location, end.location)].add((src.cur, dst.cur, src, dst))
+            #TODO 可以测试数值是否一致
 
-station_name = "上梅林"
-_df, df_connectors = get_exchange_link_info(nodes, station_name)
+    logger.info(f"coord_pair_2_ods: {coord_pair_2_ods.keys()}")
+    for key, values in coord_pair_2_ods.items():
+        src_loc, dst_loc = key
+        for item in values:
+            src_id, dst_id, src, dst = item
+            nidxs = [src_id, dst_id]
+            if src.prev is None or dst.next is None:
+                continue
+            
+            start, end = nodes.loc[src.prev], nodes.loc[dst.next]
+            _, _, connectors = get_subway_routes(
+                start, end, strategy=0, citycode=CITYCODE, memo=DIRECTION_MEMO)
+            
+            if not connectors.empty:
+                connectors.query('src_id in @nidxs and dst_id in @nidxs', inplace=True)
+                attrs = ['src_id', 'dst_id']
+                for att in ['cost', 'distance']:
+                    if att in connectors.columns:
+                        attrs.append(att)
+                connectors.drop_duplicates(attrs, keep='first', inplace=True)
+                if connectors.shape[0] > 1:
+                    logger.info(f"\n{connectors}")
+                # assert connectors.shape[0] == 1, "check the connetors."
+            if not connectors.empty:
+                logger_helper(start, end, connectors)
+                for src_id, dst_id, _, _ in values:
+                    _connectors = connectors.copy()
+                    _connectors.src_id = src_id
+                    _connectors.dst_id = dst_id
+                    connectors_lst.append(_connectors)
+                break
+        else:
+            logger.warning(f"({src_loc}, {dst_loc}) don't have connectings")    
+    connecters = pd.concat(connectors_lst)\
+                   .drop_duplicates(['src_id', 'dst_id'])\
+                   .reset_index(drop=True) if len(connectors_lst) else pd.DataFrame()
+    
+    return connecters
+
+
+special_exchanges = set(['深圳北站', '福民', '福永', '机场东', '少年宫', '市民中心'])
+
+station_name = "深圳北站"
+# station_name = next(name_iter)
+df_connectors = get_exchange_link_info(nodes, station_name)
 df_connectors
-# routes, steps, walkings = get_subway_routes(_df.iloc[0].src, _df.iloc[0].dst, strategy=0, citycode='0755', memo=DIRECTION_MEMO)
-# walkings
 
 # %%
-df_connectors = df_connectors.drop_duplicates(['src_id', 'dst_id']).reset_index(drop=True)
 
-df_connectors.src_id.value_counts()
+
+#%%
+nid = '440300024060027'
+find_transfer_station_at_same_location(nid, nodes)
+
+    
 # %%

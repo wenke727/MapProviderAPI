@@ -130,7 +130,7 @@ def parse_transit_directions(data, mode='地铁线路', verbose=False):
     # `transits` is None
     if not transits:
         logger.warning("No tranists records!")
-        return steps
+        return steps, pd.DataFrame()
     
     step_lst = []
     route_lst = []
@@ -150,7 +150,7 @@ def parse_transit_directions(data, mode='地铁线路', verbose=False):
 
     return df_routes, df_steps
     
-def extract_walking_steps_from_routes(routes:pd.DataFrame):
+def extract_walking_steps_from_routes(routes:pd.DataFrame, keep_od_details=False):
     def extract_walking_steps(route):
         if 'walking_0_info' not in list(route):
             return pd.DataFrame()
@@ -192,7 +192,8 @@ def extract_walking_steps_from_routes(routes:pd.DataFrame):
     walkings.loc[:, 'src_loc'] = walkings.src.apply(lambda x: x['location'])
     walkings.loc[:, 'dst_loc'] = walkings.dst.apply(lambda x: x['location'])
     walkings.loc[:, 'same_loc'] = walkings.src_loc == walkings.dst_loc
-    walkings.drop(columns=['src', 'dst'], inplace=True)
+    if not keep_od_details:
+        walkings.drop(columns=['src', 'dst'], inplace=True)
     walkings.drop_duplicates(['src_id', 'dst_id', 'src_loc'], inplace=True)
 
     attrs = list(walkings)
@@ -239,22 +240,16 @@ def filter_route_by_lineID(steps, src, dst):
     return cond
 
 def get_subway_routes(src:pd.Series, dst:pd.Series, strategy:int=2, 
-                      citycode:str='0755', mode:str='地铁线路', memo:dict={}):
+                      citycode:str='0755', mode:str='地铁线路', memo:dict={}, keep_od_details=False):
     desc = f"{src['name']} --> {dst['name']}"
     response_data = query_transit_directions(
         src.location, dst.location, citycode, citycode, KEY, strategy, memo=memo, desc=desc)
     routes, steps = parse_transit_directions(response_data, mode=mode)
     routes.loc[:, 'memo'] = desc
-    # logger.debug(f"\n{routes}")
-    # routes = __filter_dataframe_columns(routes)
     
-    walkings = extract_walking_steps_from_routes(steps)
-    # same_stops = filter_route_by_lineID(steps)
+    walkings = extract_walking_steps_from_routes(steps, keep_od_details)
     routes = routes.assign(stop_check=filter_route_by_lineID(steps, src, dst))
-    
-    # steps = filter_route_by_lineID(steps, src, dst)
     steps.set_index('route', inplace=True)
-    # routes = routes.loc[steps.route.values]
     
     return routes, steps, walkings
 
