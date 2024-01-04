@@ -195,6 +195,7 @@ def extract_walking_steps_from_routes(routes:pd.DataFrame, keep_od_details=False
     if not keep_od_details:
         walkings.drop(columns=['src', 'dst'], inplace=True)
     walkings.drop_duplicates(['src_id', 'dst_id', 'src_loc'], inplace=True)
+    walkings.rename(columns={'src_id': 'src', 'dst_id': 'dst'}, inplace=True)
 
     attrs = list(walkings)
     if 'cost' in attrs:
@@ -245,8 +246,11 @@ def get_subway_routes(src:pd.Series, dst:pd.Series, strategy:int=2,
     response_data = query_transit_directions(
         src.location, dst.location, citycode, citycode, KEY, strategy, memo=memo, desc=desc)
     routes, steps = parse_transit_directions(response_data, mode=mode)
-    routes.loc[:, 'memo'] = desc
     
+    if routes.empty:
+        return routes, steps, pd.DataFrame()
+    
+    routes.loc[:, 'memo'] = desc
     walkings = extract_walking_steps_from_routes(steps, keep_od_details)
     routes = routes.assign(stop_check=filter_route_by_lineID(steps, src, dst))
     steps.set_index('route', inplace=True)
@@ -325,6 +329,22 @@ if __name__ == "__main__":
         'sequence': '17',
         'line_id': '440300024050',
         'line_name': '地铁7号线'})
+    ]
+    tets_cases.append([src, dst])
+
+    src, dst = [
+        pd.Series({'id': 'BV10249884',
+            'location': '114.023531,22.621785',
+            'name': '红山',
+            'sequence': '11',
+            'line_id': '440300024075',
+            'line_name': '地铁4号线'}),
+        pd.Series({'id': 'BV10249884',
+            'location': '114.0234,22.621707',
+            'name': '红山',
+            'sequence': '19',
+            'line_id': '440300024047',
+            'line_name': '地铁6号线'})
     ]
     tets_cases.append([src, dst])
 

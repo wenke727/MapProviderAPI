@@ -6,7 +6,7 @@ import networkx as nx
 import geopandas as gpd
 from loguru import logger
 import shapely
-from shapely.geometry import MultiPoint
+from shapely.geometry import MultiPoint, LineString
 from collections import defaultdict
 
 from cfg import KEY, DATA_FOLDER, ROUTE_COLUMNS, EXP_FOLDER
@@ -30,6 +30,21 @@ DEFAULT_TRANSFER_COST = {'cost': 60, 'distance': 100}
 logger = make_logger(DATA_FOLDER, 'network', include_timestamp=False)
 
 #%%
+
+
+def __find_transfer_station_at_same_location(nid, nodes):
+    # 为简单起见，若是 line_name 和 location 一致, 则认为是同站台换乘
+    item = nodes.loc[nid]
+    line_name = item.line_name
+    location = item.location 
+    
+    cands = nodes.query(f"location == @location and line_name == @line_name")
+    cands = cands[cands.index != nid]
+    if cands.empty:
+        return None
+
+    return cands
+
 
 """ 辅助函数 """
 def _split_subway_line_name(series):
@@ -186,6 +201,93 @@ def get_subway_segment_info(stations, strategy=0, citycode=CITYCODE, memo={}, sl
     
     return df_routes, df_steps, df_links, df_nodes
 
+def get_exchange_link_info(nodes, station_name):
+    # 获取一个换乘站的所有连接
+    def logger_helper(start, end, connectors):
+        if connectors.empty:
+            logger.warning(f"{start['name']}({start['line_name']}) -> {end['name']}({start['line_name']}): empty")
+            return
+            
+        connectors_lst.append(connectors)
+        _len = len(connectors)
+        level='debug'
+        if _len == 0:
+            level = 'warning'
+        elif _len > 1:
+            level = 'info'
+        if level == "debug":
+            return
+        getattr(logger, level)(f"{station_name} 连接线: {start['name']} -> {end['name']} : {_len}")
+        logger.debug(f"\n{connectors}")        
+
+    def get_nid(x):
+        if isinstance(x, list):
+            if len(x) == 0:
+                return None
+            return x[0]
+        else:
+            return x
+        
+    station_nodes = query_dataframe(nodes, 'name', station_name)
+    nidxs = np.sort(station_nodes.index)
+    logger.debug(f"{station_name}: {nidxs}")
+
+    points = pd.DataFrame([metro.get_adj_nodes(nid) for nid in nidxs])
+    points.loc[:, 'prev'] = points['prev'].apply(get_nid)
+    points.loc[:, 'next'] = points['next'].apply(get_nid)
+    points.loc[:, 'line_name'] = points['cur'].apply(lambda x: nodes.loc[x].line_name)
+
+    connectors_lst = []
+    coord_pair_2_ods = defaultdict(set)
+    for i, src in enumerate(points.itertuples()):
+        for j, dst in enumerate(points.itertuples()):
+            if i == j or src.line_name == dst.line_name:
+                continue
+            # if nodes.loc[src.cur].location == nodes.loc[dst.cur].location:
+            #     continue
+            
+            start, end = nodes.loc[src.cur], nodes.loc[dst.cur]
+            coord_pair_2_ods[(start.location, end.location)].add((src.cur, dst.cur, src, dst))
+            #TODO 可以测试数值是否一致
+
+    logger.info(f"coord_pair_2_ods: {coord_pair_2_ods.keys()}")
+    for key, values in coord_pair_2_ods.items():
+        src_loc, dst_loc = key
+        for item in values:
+            src_id, dst_id, src, dst = item
+            nidxs = [src_id, dst_id]
+            if src.prev is None or dst.next is None:
+                continue
+            
+            start, end = nodes.loc[src.prev], nodes.loc[dst.next]
+            _, _, connectors = get_subway_routes(
+                start, end, strategy=0, citycode=CITYCODE, memo=DIRECTION_MEMO)
+            
+            if not connectors.empty:
+                connectors.query('src in @nidxs and dst in @nidxs', inplace=True)
+                attrs = ['src', 'dst']
+                for att in ['cost', 'distance']:
+                    if att in connectors.columns:
+                        attrs.append(att)
+                connectors.drop_duplicates(attrs, keep='first', inplace=True)
+                if connectors.shape[0] > 1:
+                    logger.info(f"\n{connectors}")
+                # assert connectors.shape[0] == 1, "check the connetors."
+            if not connectors.empty:
+                logger_helper(start, end, connectors)
+                for src_id, dst_id, _, _ in values:
+                    _connectors = connectors.copy()
+                    _connectors.src = src_id
+                    _connectors.dst = dst_id
+                    connectors_lst.append(_connectors)
+                break
+        else:
+            logger.warning(f"({src_loc}, {dst_loc}) don't have connectings")    
+    connecters = pd.concat(connectors_lst)\
+                   .drop_duplicates(['src', 'dst'])\
+                   .reset_index(drop=True) if len(connectors_lst) else pd.DataFrame()
+    
+    return connecters
 
 
 class MetroNetwork(Network):
@@ -295,7 +397,6 @@ if __name__ == "__main__":
     G = metro.graph
     df_lines = metro.df_lines
     df_stations = metro.df_stations
-
     
     lines_iter = iter(metro.df_lines.iterrows())
 
@@ -303,158 +404,66 @@ if __name__ == "__main__":
     nodes = metro.nodes_to_dataframe()
     edges = metro.edges_to_dataframe()
 
+    # ? 福民 还有缺失
+    # df_connectors = get_exchange_link_info(nodes, '福民')
+    
 #%%
 # TODO
 """ 切分线路 """
-
-name_2_idx = nodes.reset_index().set_index(['line_id', 'name'])['index']
-available_srarion_mask = df_stations.apply(lambda x: (x['line_id'], x['name']) not in UNAVAILABEL_STATIONS, axis=1)
-seg_geoms = []
-for line_id in df_lines.line_id.values:
-    segs = split_linestring_by_stations(line_id, df_lines, df_stations[available_srarion_mask])
-    segs.loc[:, 'src'] = segs.apply(lambda x: name_2_idx.get((x.line_id, x.src_name)), axis=1)
-    segs.loc[:, 'dst'] = segs.apply(lambda x: name_2_idx.get((x.line_id, x.dst_name)), axis=1)
-    segs = gpd.GeoDataFrame(segs).set_geometry('geometry')
-    seg_geoms.append(segs)
+def get_edges(df_lines, df_stations, nodes, keys=['src', 'dst']):
+    name_2_idx = nodes.reset_index().set_index(['line_id', 'name'])['index']
+    available_srarion_mask = df_stations.apply(lambda x: (x['line_id'], x['name']) not in UNAVAILABEL_STATIONS, axis=1)
     
-seg_geoms = gpd.GeoDataFrame(pd.concat(seg_geoms), crs=4326)
+    seg_geoms = []
+    for line_id in df_lines.line_id.values:
+        segs = split_linestring_by_stations(line_id, df_lines, df_stations[available_srarion_mask])
+        segs.loc[:, 'src'] = segs.apply(lambda x: name_2_idx.get((x.line_id, x.src_name)), axis=1)
+        segs.loc[:, 'dst'] = segs.apply(lambda x: name_2_idx.get((x.line_id, x.dst_name)), axis=1)
+        segs = gpd.GeoDataFrame(segs).set_geometry('geometry')
+        seg_geoms.append(segs)
+        
+    seg_geoms = gpd.GeoDataFrame(pd.concat(seg_geoms), crs=4326)
 
-keys = ['src', 'dst']
-seg_geoms.sort_values(keys, inplace=True)
-edges.sort_values(keys, inplace=True)
+    seg_geoms.sort_values(keys, inplace=True)
+    edges.sort_values(keys, inplace=True)
+    assert np.allclose(seg_geoms[keys].astype(int), edges[keys].astype(int))
 
-assert np.allclose(seg_geoms[keys].astype(int), edges[keys].astype(int))
+    seg_geoms = seg_geoms.merge(edges, on=keys)
+    seg_geoms.set_geometry('geometry', inplace=True)
+    seg_geoms.set_index(keys, inplace=True)
 
-seg_geoms = seg_geoms.merge(edges, on=keys)
-seg_geoms.set_geometry('geometry', inplace=True)
-seg_geoms.set_index(keys)
+    return seg_geoms
 
-#%%
-to_geojson(seg_geoms, "../exp/subway_segments")
+seg_geoms = get_edges(df_lines, df_stations, nodes, keys=['src', 'dst'])
+seg_geoms
+# to_geojson(seg_geoms, "../exp/subway_segments")
 
 #%%
 #! 获取换乘站点的连接信息
 exchanges = metro.get_exchange_stations()
-exchanges = exchanges[exchanges.link].reset_index(drop=True)
-name_iter = iter(exchanges.name.values)
+exchanges
+# name_iter = iter(exchanges.name.values)
 
 # %%
-
-def find_transfer_station_at_same_location(nid, nodes):
-    # 为简单起见，若是 line_name 和 location 一致, 则认为是同站台换乘
-    item = nodes.loc[nid]
-    line_name = item.line_name
-    location = item.location 
-    
-    cands = nodes.query(f"location == @location and line_name == @line_name")
-    cands = cands[cands.index != nid]
-    if cands.empty:
-        return None
-
-    return cands
-
-def get_exchange_link_info(nodes, station_name):
-    # 如何获取一个换乘站的所有连接
-    def logger_helper(start, end, connectors):
-        if connectors.empty:
-            logger.warning(f"{start['name']}({start['line_name']}) -> {end['name']}({start['line_name']}): empty")
-            return
-            
-        connectors_lst.append(connectors)
-        _len = len(connectors)
-        level='debug'
-        if _len == 0:
-            level = 'warning'
-        elif _len > 1:
-            level = 'info'
-        if level == "debug":
-            return
-        getattr(logger, level)(f"{station_name} 连接线: {start['name']} -> {end['name']} : {_len}")
-        logger.debug(f"\n{connectors}")        
-
-    def get_nid(x):
-        if isinstance(x, list):
-            if len(x) == 0:
-                return None
-            return x[0]
-        else:
-            return x
-        
-    station_nodes = query_dataframe(nodes, 'name', station_name)
-    nidxs = np.sort(station_nodes.index)
-    logger.debug(f"{station_name}: {nidxs}")
-
-    points = pd.DataFrame([metro.get_adj_nodes(nid) for nid in nidxs])
-    points.loc[:, 'prev'] = points['prev'].apply(get_nid)
-    points.loc[:, 'next'] = points['next'].apply(get_nid)
-    points.loc[:, 'line_name'] = points['cur'].apply(lambda x: nodes.loc[x].line_name)
-
-    connectors_lst = []
-    coord_pair_2_ods = defaultdict(set)
-    for i, src in enumerate(points.itertuples()):
-        for j, dst in enumerate(points.itertuples()):
-            if i == j or src.line_name == dst.line_name:
-                continue
-            # if nodes.loc[src.cur].location == nodes.loc[dst.cur].location:
-            #     continue
-            
-            start, end = nodes.loc[src.cur], nodes.loc[dst.cur]
-            coord_pair_2_ods[(start.location, end.location)].add((src.cur, dst.cur, src, dst))
-            #TODO 可以测试数值是否一致
-
-    logger.info(f"coord_pair_2_ods: {coord_pair_2_ods.keys()}")
-    for key, values in coord_pair_2_ods.items():
-        src_loc, dst_loc = key
-        for item in values:
-            src_id, dst_id, src, dst = item
-            nidxs = [src_id, dst_id]
-            if src.prev is None or dst.next is None:
-                continue
-            
-            start, end = nodes.loc[src.prev], nodes.loc[dst.next]
-            _, _, connectors = get_subway_routes(
-                start, end, strategy=0, citycode=CITYCODE, memo=DIRECTION_MEMO)
-            
-            if not connectors.empty:
-                connectors.query('src_id in @nidxs and dst_id in @nidxs', inplace=True)
-                attrs = ['src_id', 'dst_id']
-                for att in ['cost', 'distance']:
-                    if att in connectors.columns:
-                        attrs.append(att)
-                connectors.drop_duplicates(attrs, keep='first', inplace=True)
-                if connectors.shape[0] > 1:
-                    logger.info(f"\n{connectors}")
-                # assert connectors.shape[0] == 1, "check the connetors."
-            if not connectors.empty:
-                logger_helper(start, end, connectors)
-                for src_id, dst_id, _, _ in values:
-                    _connectors = connectors.copy()
-                    _connectors.src_id = src_id
-                    _connectors.dst_id = dst_id
-                    connectors_lst.append(_connectors)
-                break
-        else:
-            logger.warning(f"({src_loc}, {dst_loc}) don't have connectings")    
-    connecters = pd.concat(connectors_lst)\
-                   .drop_duplicates(['src_id', 'dst_id'])\
-                   .reset_index(drop=True) if len(connectors_lst) else pd.DataFrame()
-    
-    return connecters
-
-
 special_exchanges = set(['深圳北站', '福民', '福永', '机场东', '少年宫', '市民中心'])
 
-station_name = "深圳北站"
-# station_name = next(name_iter)
-df_connectors = get_exchange_link_info(nodes, station_name)
+df_connectors_lst = []
+for station_name in exchanges.name.values:
+    df_connectors = get_exchange_link_info(nodes, station_name)
+    df_connectors_lst.append(df_connectors)
+
+df_connectors = pd.concat(df_connectors_lst)
+df_connectors = df_connectors.fillna(0).rename(columns={'station_name': 'src_name'})
+df_connectors.drop(columns=['route', 'src_loc', 'dst_loc', 'same_loc'], inplace=True)
+
+df_connectors = df_connectors.assign(
+    dst_name = 'exchange',
+    line_id = df_connectors.dst.apply(lambda x: x[:-3]),
+    geometry = LineString()
+)
 df_connectors
 
 # %%
+pd.concat([seg_geoms, df_connectors.set_index(['src', 'dst'])],  axis=0)
 
-
-#%%
-nid = '440300024060027'
-find_transfer_station_at_same_location(nid, nodes)
-
-    
 # %%
