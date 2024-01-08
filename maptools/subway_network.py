@@ -27,7 +27,7 @@ UNAVAILABEL_STATIONS = set([])
 # 默认换乘花销，即：起点和终点经纬度一致的时候
 DEFAULT_TRANSFER_COST = {'cost': 60, 'distance': 100}
 
-DEFAULT_TRANSFER_DISTANCE = 100
+DEFAULT_TRANSFER_DISTANCE = 20
 
 logger = make_logger(DATA_FOLDER, 'network', include_timestamp=False)
 
@@ -455,8 +455,12 @@ class MetroNetwork(Network):
         df_connectors = get_exchange_links(self)
         df_inner_connetors = get_station_inner_links(self.nodes)
 
-        self.edges_and_links = pd.concat([seg_geoms, df_connectors.set_index(['src', 'dst']), df_inner_connetors], axis=0)
+        self.edges_and_links = pd.concat(
+            [seg_geoms, df_connectors.set_index(['src', 'dst']), df_inner_connetors.set_index(['src', 'dst'])], 
+            axis=0)
         # self.edges_and_links = gpd.GeoDataFrame(self.edges_and_links, crs=4326)
+        
+        return self.edges_and_links
 
     def adapt_graph_to_GeoDigraph(self):
         df_nodes = self.nodes_to_dataframe()
@@ -514,27 +518,10 @@ if __name__ == "__main__":
 
     # graph 适配    
     df_nodes, df_edges = metro.adapt_graph_to_GeoDigraph()
-    # to_geojson(graph_edges, "../exp/shezhen_subway_edges")
+    
 
-# %%
-import sys
-sys.path.append('../../ST-MapMatching')
-
-from mapmatching.graph import GeoDigraph
-
-
-# %%
-net = GeoDigraph(df_edges, df_nodes)
-
-# %%
-net
-
-# %%
-
-
-
-get_station_inner_links(metro.nodes)
-
-
+    # save
+    to_geojson(df_edges, "../exp/shezhen_subway_edges")
+    to_geojson(df_nodes, "../exp/shezhen_subway_nodes")
 
 # %%
