@@ -1,3 +1,7 @@
+#%%
+import sys
+sys.path.append('./maptools')
+
 import re
 from provider.search import search_API
 from geo.visualize import plot_buffered_zones
@@ -22,3 +26,5 @@ if __name__ == "__main__":
     # plot_buffered_zones(df_entrances.query("parent == @max_idx"), [50, 100, 200], station_name);
     plot_buffered_zones(df_entrances.query("parent == @max_idx"), [10], station_name, label='label');
 
+
+# %%

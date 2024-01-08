@@ -48,7 +48,10 @@ class Network:
             return "No path found"
 
     def nodes_to_dataframe(self):
-        return pd.DataFrame.from_dict(dict(self.graph.nodes(data=True)), orient='index')
+        df = pd.DataFrame.from_dict(dict(self.graph.nodes(data=True)), orient='index')
+        df.loc[:, 'nid'] = df.index
+        
+        return df
 
     def edges_to_dataframe(self):
         edges_data = self.graph.edges(data=True)
