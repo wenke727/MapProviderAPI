@@ -26,7 +26,7 @@ CITYCODE = '0755'
 UNAVAILABEL_STATIONS = set([])
 
 # 默认换乘距离，即：起点和终点经纬度一致的时候
-DEFAULT_TRANSFER_DISTANCE = 20
+DEFAULT_TRANSFER_DISTANCE = 100
 
 logger = make_logger(DATA_FOLDER, 'network', include_timestamp=False)
 
@@ -51,7 +51,7 @@ def _split_subway_line_name(series):
 def _load_subway_lines(line_fn):
     df_lines = gpd.read_file(line_fn).rename(columns={'id': 'line_id'})
     if "status" in list(df_lines):
-        df_lines.status = df_lines.status.astype(int)
+        df_lines.status = df_lines.status.astype(np.int64)
         unavailabel_line = df_lines.query("status != 1").name.unique().tolist()
         logger.warning(f"Unavailabel lines: {unavailabel_line}")
         df_lines.query('status == 1', inplace=True)
@@ -105,8 +105,8 @@ def split_linestring_by_stations(line_id, df_lines, df_stations):
 
 def _extract_segment_info_from_routes(routes_lst:list):
     df_segs = pd.concat(routes_lst)
-    df_segs['cost'] = df_segs['cost'].astype(int)
-    df_segs['distance'] = df_segs['distance'].astype(int)
+    df_segs['cost'] = df_segs['cost'].astype(np.int64)
+    df_segs['distance'] = df_segs['distance'].astype(np.int64)
 
     _len = df_segs.shape[0]
     edges = []
@@ -135,7 +135,7 @@ def _extract_segment_info_from_routes(routes_lst:list):
     
     return df_edges
 
-def get_subway_segment_info(stations, strategy=0, citycode=CITYCODE, memo={}, sleep_dt=.2, auto_save=True):
+def get_subway_segment_info(stations, strategy=0, citycode=CITYCODE, sleep_dt=.2, auto_save=True):
     if stations.empty or 'name' not in stations.columns:
         logger.error("Invalid stations data")
         return pd.DataFrame()
@@ -145,7 +145,7 @@ def get_subway_segment_info(stations, strategy=0, citycode=CITYCODE, memo={}, sl
     walking_lst = []
     unavailabel_stops = []
     def __helper(src, dst):
-        routes, steps, walking_steps = get_subway_routes(src, dst, strategy, citycode, memo=memo)
+        routes, steps, walking_steps = get_subway_routes(src, dst, strategy, citycode, memo=DIRECTION_MEMO)
         routes.query("stop_check == True", inplace=True)
         if sleep_dt: time.sleep(sleep_dt)
         
@@ -292,7 +292,7 @@ def get_edges(df_lines, df_stations, edges, nodes, keys=['src', 'dst']):
     seg_geoms.sort_values(keys, inplace=True)
     edges.sort_values(keys, inplace=True)
     logger.info(seg_geoms.keys())
-    assert np.allclose(seg_geoms[keys].astype(int), edges[keys].astype(int))
+    assert np.allclose(seg_geoms[keys].astype(np.int64), edges[keys].astype(np.int64))
     seg_geoms = seg_geoms.merge(edges, on=keys)
 
     seg_geoms.set_geometry('geometry', inplace=True)
@@ -418,11 +418,10 @@ class MetroNetwork(Network):
             line_name = line['line_name']
 
             stations = query_dataframe(self.df_stations, 'line_id', line_id)
-            df_routes, df_steps, _edges, _nodes = get_subway_segment_info(
-                stations, strategy=2, memo=DIRECTION_MEMO, sleep_dt=sleep_dt)
+            df_routes, df_steps, _edges, _nodes = get_subway_segment_info(stations, strategy=2, sleep_dt=sleep_dt)
             
             # 获取发车时间间隔
-            time_gap = np.unique(df_steps.cost.astype(int).values[:len(_edges)] - _edges.cost.astype(int).values.cumsum())
+            time_gap = np.unique(df_steps.cost.astype(np.int64).values[:len(_edges)] - _edges.cost.astype(np.int64).values.cumsum())
             assert len(time_gap) == 1, "可能存在大小区间"
             self.lineid_2_waiting_time[line_id] = time_gap[0]
             
@@ -463,7 +462,7 @@ class MetroNetwork(Network):
 
     def adapt_graph_to_GeoDigraph(self):
         df_nodes = self.nodes_to_dataframe()
-        df_nodes.index = df_nodes.index.astype(int)
+        df_nodes.index = df_nodes.index.astype(np.int64)
         df_nodes = df_nodes.assign(
             nid = df_nodes.index,
             geometry = df_nodes.location.apply(lambda x:str_to_point(x, 'wgs'))
@@ -475,7 +474,7 @@ class MetroNetwork(Network):
         df_edges = self.edges_and_links.copy()
         df_edges.rename(columns={'line_id': 'way_id'}, inplace=True) # , 'cost': 'walking', 'duration': 'cost'
         df_edges.reset_index(inplace=True)
-        df_edges[['src', 'dst']] = df_edges[['src', 'dst']].astype(int)
+        df_edges[['src', 'dst']] = df_edges[['src', 'dst']].astype(np.int64)
         df_edges = df_edges.reset_index().rename(columns={'index': 'eid'})
         df_edges = df_edges.assign(
             dir = 0,

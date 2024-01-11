@@ -28,12 +28,12 @@ class Network:
         for id, node in zip(nodes.index, nodes.to_dict(orient='records')):
             self.add_node(id, **node)
 
-    def add_edge(self, src, dst, distance=0, duration=0, *args, **kwargs):
-        self.graph.add_edge(src, dst, distance=distance, duration=duration, *args, **kwargs)
+    def add_edge(self, src, dst, length=0, duration=0, *args, **kwargs):
+        self.graph.add_edge(src, dst, distance=length, duration=duration, *args, **kwargs)
 
-    def add_edges(self, edges:pd.DataFrame):
-        for link in edges.itertuples():
-            self.add_edge(link.src, link.dst, distance=link.distance, duration=link.cost)
+    def add_edges(self, edges:pd.DataFrame, length='length', duration='duration'):
+        for _, link in edges.iterrows():
+            self.add_edge(link.src, link.dst, length=link[length], duration=link[duration])
 
     def shortest_path(self, source, target, weight='distance'):
         try:
