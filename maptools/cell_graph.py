@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 from shapely import Point
-from geo.distance import cal_pointwise_distance_geoseries as cal_distance
+from geo.distance import cal_pointwise_distance_geoseries as cal_pointwise_distance_geoseries
 
 fn = "../data/cells/traj_00011.geojson"
 fn = '../data/cells/traj_00002.geojson'

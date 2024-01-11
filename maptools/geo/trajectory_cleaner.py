@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 
-from geo.distance import cal_pointwise_distance_geoseries as cal_distance
+from geo.distance import cal_pointwise_distance_geoseries as cal_pointwise_distance_geoseries
 
 
 def calculate_angle_between_sides(adjacent_side1, adjacent_side2, opposite_side):
@@ -42,9 +42,9 @@ def traj_clean_drift(data, col=['rid', 'dt', 'geometry'],
         df[i + '_next'] = df[i].shift(-1)
 
     # TODO: 转换
-    df['dis_pre'] = cal_distance(df[Geometry], df[Geometry + '_pre'])
-    df['dis_next'] = cal_distance(df[Geometry], df[Geometry + '_next'])
-    df['dis_prenext'] = cal_distance(df[Geometry + '_pre'], df[Geometry + '_next'])
+    df['dis_pre'] = cal_pointwise_distance_geoseries(df[Geometry], df[Geometry + '_pre'])
+    df['dis_next'] = cal_pointwise_distance_geoseries(df[Geometry], df[Geometry + '_next'])
+    df['dis_prenext'] = cal_pointwise_distance_geoseries(df[Geometry + '_pre'], df[Geometry + '_next'])
 
     oneside_mask = (df[Rid + '_pre'] == df[Rid])
     twoside_mask = oneside_mask & (df[Rid + '_next'] == df[Rid])
@@ -88,6 +88,7 @@ def traj_clean_drift(data, col=['rid', 'dt', 'geometry'],
 
 
 if __name__ == "__main__":
-    _records = traj_clean_drift(records)
+    traj = read_csv_to_geodataframe('./data/cells/004.csv')
+    _records = traj_clean_drift(traj)
     _records
     

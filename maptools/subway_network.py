@@ -24,9 +24,8 @@ DIRECTION_MEMO = load_checkpoint(DIRECTION_MEMO_FN)
 
 CITYCODE = '0755'
 UNAVAILABEL_STATIONS = set([])
-# 默认换乘花销，即：起点和终点经纬度一致的时候
-DEFAULT_TRANSFER_COST = {'cost': 60, 'distance': 100}
 
+# 默认换乘距离，即：起点和终点经纬度一致的时候
 DEFAULT_TRANSFER_DISTANCE = 20
 
 logger = make_logger(DATA_FOLDER, 'network', include_timestamp=False)
