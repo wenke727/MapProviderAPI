@@ -49,3 +49,7 @@ def make_logger(folder, filename=None, level='DEBUG', mode='w', console=True,
         return None
     
     return logger
+
+def logger_dataframe(df, desc="", level='debug'):
+    getattr(logger, level)(f"{desc}\n{df}")
+

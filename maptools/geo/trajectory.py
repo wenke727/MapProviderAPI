@@ -1,4 +1,7 @@
 #%%
+import sys
+sys.path.append('../')
+
 import shapely
 import numpy as np
 import pandas as pd
@@ -7,15 +10,14 @@ from geopandas import GeoDataFrame
 from loguru import logger
 
 from base import BaseTrajectory
-from utils import convert_geom_to_utm_crs, convert_geom_to_wgs
+from geo_utils import convert_geom_to_utm_crs, convert_geom_to_wgs
 from serialization import read_csv_to_geodataframe
+
+from utils.logger import logger_dataframe, make_logger
 
 TRAJ_ID_COL = "tid"
 
 #%%
-
-def logger_dataframe(df, desc="", level='debug'):
-    getattr(logger, level)(f"{desc}/n{df}")
 
 
 def calculate_angle_between_sides(adjacent_side1, adjacent_side2, opposite_side):
@@ -39,26 +41,67 @@ def calculate_angle_between_sides(adjacent_side1, adjacent_side2, opposite_side)
 
     return angles
 
-def get_outliers_thred_by_iqr(series, alpha=3):
+def get_outliers_thred_by_iqr(series, alpha=2):
     """
-    Returns a series of indexes of row that are to be considered outliers
-    using the quantiles of the data.
+    Calculate and return the lower and upper threshold values for outlier detection
+    in a given series, using the Interquartile Range (IQR) method.
+
+    Parameters:
+    series (pd.Series): A Pandas Series for which to calculate the outlier thresholds.
+    alpha (int, optional): The multiplier for IQR to set the thresholds. Default is 3.
+
+    Returns:
+    tuple: A tuple containing two elements:
+           - The lower threshold for outlier detection.
+           - The upper threshold for outlier detection.
     """
     q25, q75 = series.quantile((0.25, 0.75))
     iqr = q75 - q25
     q_high = q75 + alpha * iqr
     q_low = q25 - alpha * iqr
-    # return the row indexes that are over/under the calculated threshold
     
     return q_low, q_high
 
+def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometry'],
+                     method='twoside', speed_limit=None, dis_limit=None,
+                     angle_limit=30, alpha=1, strict=False):
+    """
+    Clean drift in trajectory data by filtering out points based on speed, distance, 
+    and angle thresholds.
 
-def traj_clean_drift(data:GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometry'],
-                     method='twoside',
-                     speedlimit=None,
-                     dislimit=None,
-                     anglelimit=30, alpha=1):
-    def _preprocess(df):
+    This function processes a GeoDataFrame containing trajectory data and removes 
+    points that are considered drifts based on specified criteria. The filtering 
+    conditions include speed and distance limits and angular constraints. It 
+    supports both one-sided and two-sided filtering methods and offers a 'strict' 
+    mode for more stringent filtering.
+
+    Parameters:
+    - data (GeoDataFrame): The trajectory data to be processed.
+    - col (list, optional): The columns to use, default is [TRAJ_ID_COL, 'dt', 'geometry'].
+    - method (str, optional): The filtering method, either 'oneside' or 'twoside', default is 'twoside'.
+    - speed_limit (float, optional): The speed threshold for filtering, default is None.
+    - dis_limit (float, optional): The distance threshold for filtering, default is None.
+    - angle_limit (float, optional): The angle threshold for filtering, default is 30 degrees.
+    - alpha (float, optional): The multiplier for calculating IQR based thresholds, default is 1.
+    - strict (bool, optional): If set to True, applies stricter filtering conditions, default is False.
+
+    Returns:
+    GeoDataFrame: The cleaned trajectory data with drift points removed based on the specified criteria.
+
+    Examples:
+    >>> cleaned_data = traj_clean_drift(trajectory_data, speed_limit=50, dis_limit=100, strict=True)
+    >>> cleaned_data = traj_clean_drift(trajectory_data, method='oneside', angle_limit=45, alpha=2)
+    """
+    _len = len(data)
+    [Rid, Time, Geometry] = col
+    def _preprocess(data):
+        df = data[col].copy()
+        df = df.drop_duplicates(subset=[Rid, Time])
+        df = df.sort_values(by=[Rid, Time])
+
+        if df.crs.to_epsg() == 4326:
+            convert_geom_to_utm_crs(df, inplace=True)
+        
         for i in [Rid, Geometry, Time]:
             df[i + '_pre'] = df[i].shift()
             df[i + '_next'] = df[i].shift(-1)
@@ -77,48 +120,47 @@ def traj_clean_drift(data:GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometry'],
         
         return df
 
-    [Rid, Time, Geometry] = col
-    df = data[col].copy()
-    df = df.drop_duplicates(subset=[Rid, Time])
-    df = df.sort_values(by=[Rid, Time])
-
-    if data.crs.to_epsg() == 4326:
-        convert_geom_to_utm_crs(df, inplace=True)
-
-    df = _preprocess(df)
+    df = _preprocess(data)
+    op = lambda a, b: a | b if not strict else a & b
 
     # traj mask
     traj_mask = (df[Rid + '_pre'] == df[Rid])
     if method == 'twoside':
         traj_mask = traj_mask & (df[Rid + '_next'] == df[Rid])
 
-    if speedlimit is None:
-        _, speedlimit = get_outliers_thred_by_iqr(df['speed_pre'], alpha)
-    if method == 'oneside':
-        df = df[-(traj_mask & (df['speed_pre'] > speedlimit))]
-    elif method == 'twoside':
-        df = df[~(traj_mask
-                    & (df['speed_pre'] > speedlimit) | (df['speed_next'] > speedlimit)
-                    )] # & (df['speed_prenext'] < speedlimit)
+    # speed limit
+    speed_mask = np.zeros(_len)
+    if speed_limit is not None:
+        if speed_limit == 0:
+            _, speed_limit = get_outliers_thred_by_iqr(df['speed_pre'], alpha)
+            logger.debug(f"speed limit: {speed_limit:2f}")
+        
+        if method == 'oneside':
+            speed_mask = df['speed_pre'] > speed_limit
+        elif method == 'twoside':
+            speed_mask = op(df['speed_pre'] > speed_limit, df['speed_next'] > speed_limit)
+            if strict:
+                speed_mask &= (df['speed_prenext'] < speed_limit)
 
-    if dislimit:
-        _, speedlimit = get_outliers_thred_by_iqr(df['dis_pre'], alpha)
-    if method == 'oneside':
-        df = df[
-            ~(traj_mask
-                & (df['dis_pre'] > dislimit))]
-    elif method == 'twoside':
-        df = df[
-            ~(traj_mask
-                & ((df['dis_pre'] > dislimit) | (df['dis_next'] > dislimit))
-                )] # & (df['dis_prenext'] < dislimit)
+    # distance limit
+    dis_mask = np.zeros(_len)
+    if dis_limit is not None:
+        if dis_limit == 0:
+            _, dis_limit = get_outliers_thred_by_iqr(df['dis_pre'], alpha)
+        if method == 'oneside':
+            dis_mask = df['dis_pre'] > dis_limit
+        elif method == 'twoside':
+            dis_mask = op(df['dis_pre'] > dis_limit, df['dis_next'] > dis_limit)
+            if strict:
+                dis_mask &= (df['dis_prenext'] < dis_limit)
 
-    if anglelimit:
+    # angle limit
+    angle_mask = np.zeros(_len)
+    if angle_limit:
         df['angle'] = calculate_angle_between_sides(df['dis_pre'], df['dis_next'], df['dis_prenext'])
-        df = df[-(traj_mask & (df['angle'] < anglelimit))]
+        angle_mask = df['angle'] < angle_limit
 
-    # df = df[data.columns]
-    return df
+    return df[~(traj_mask & (speed_mask | dis_mask | angle_mask))]
 
 
 class Trajectory(BaseTrajectory):
@@ -156,16 +198,17 @@ class Trajectory(BaseTrajectory):
 
 # if __name__ == "__main__":
 
-# fn = "../../../ST-MapMatching/data/cells/004.csv"
-# fn = "../../../ST-MapMatching/data/cells/014.csv"
+fn = "../../../ST-MapMatching/data/cells/004.csv"
+fn = "../../../ST-MapMatching/data/cells/014.csv"
 fn = "../../../ST-MapMatching/data/cells/420.csv"
+
 pts = read_csv_to_geodataframe(fn)
 
 traj = Trajectory(pts, traj_id=1, )
 traj.points
 
-_traj = traj_clean_drift((traj.points), anglelimit=None)
-# logger_dataframe(_traj)
+_traj = clean_drift_traj_points((traj.points), speed_limit=0, dis_limit=0, angle_limit=45, alpha=1, strict=False)
+logger_dataframe(_traj)
 
 ax = pts.plot(color='r')
 _traj.plot(ax=ax, color='b')
