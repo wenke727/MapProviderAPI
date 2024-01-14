@@ -117,7 +117,7 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
         traj_mask = traj_mask & (df[Rid + '_next'] == df[Rid])
 
     # speed limit
-    speed_mask = np.zeros(_len)
+    speed_mask = False
     if speed_limit is not None:
         if speed_limit == 0:
             _, speed_limit = get_outliers_thred_by_iqr(df['speed_pre'], alpha)
@@ -131,7 +131,7 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
                 speed_mask &= (df['speed_prenext'] < speed_limit)
 
     # distance limit
-    dis_mask = np.zeros(_len)
+    dis_mask = False
     if dis_limit is not None:
         if dis_limit == 0:
             _, dis_limit = get_outliers_thred_by_iqr(df['dis_pre'], alpha)
@@ -143,12 +143,52 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
                 dis_mask &= (df['dis_prenext'] < dis_limit)
 
     # angle limit
-    angle_mask = np.zeros(_len)
+    angle_mask = False
     if angle_limit:
         df['angle'] = calculate_angle_between_sides(df['dis_pre'], df['dis_next'], df['dis_prenext'])
         angle_mask = df['angle'] < angle_limit
 
     return df[~(traj_mask & (speed_mask | dis_mask | angle_mask))]
+
+def filter_by_point_update_policy(gdf:GeoDataFrame, radius:float, keep_last=True):
+    """
+    Optimized point update policy for GeoDataFrame with projected coordinates.
+    
+    This function identifies points that are beyond a specified radius from the 
+    last updated point, considering them as new updates and thereby reducing the 
+    number of updates sent to a server in a tracking system.
+    
+    Parameters:
+    - gdf (GeoDataFrame): The input GeoDataFrame with a 'geometry' column. 
+        It should be projected and indexed by time.
+    - radius (float): The radius threshold in the same units as the GeoDataFrame's 
+        projection (e.g., meters).
+    
+    Returns:
+    - GeoDataFrame: A new GeoDataFrame with points that qualify as updates based on 
+    the specified radius.
+    
+    Refs: 《Computing with Spatial Trajectories》
+    """
+    
+    
+    gdf = gdf.sort_index()
+    update_indices = [gdf.index[0]]
+    last_update_index = gdf.index[0]
+    
+    for idx, row in gdf.iterrows():
+        if idx == last_update_index:
+            continue
+
+        distance = row.geometry.distance(gdf.at[last_update_index, 'geometry'])
+        if distance > radius:
+            # Record index if distance exceeds the threshold
+            last_update_index = idx
+            update_indices.append(idx)
+    if keep_last and update_indices[-1] != idx:
+        update_indices.append(idx)
+        
+    return gdf.loc[update_indices]
 
 
 if __name__ == "__main__":

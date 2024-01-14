@@ -9,6 +9,9 @@ def read_csv_to_geodataframe(file_path, crs="EPSG:4326"):
     df['geometry'] = df['geometry'].apply(wkt.loads)
     gdf = gpd.GeoDataFrame(df, geometry='geometry', crs=crs)
     
+    if "Unnamed: 0" in gdf.columns:
+        gdf.drop(columns=['Unnamed: 0'], inplace=True)
+    
     return gdf
 
 

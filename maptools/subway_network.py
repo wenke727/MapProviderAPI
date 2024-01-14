@@ -330,7 +330,7 @@ def get_exchange_links(metro):
 
     return gpd.GeoDataFrame(df_connectors, crs=4326)
 
-def get_station_inner_links(nodes):
+def get_station_inner_links(nodes, lineid_2_waiting_time):
     inner_station_links = nodes.groupby(['line_name', 'name'])\
                             .agg({'nid': list}).reset_index()\
                             .rename(columns={'name': 'src_name'})
@@ -342,15 +342,22 @@ def get_station_inner_links(nodes):
     inner_station_links[['src', 'dst']] = pd.DataFrame(inner_station_links['nid'].tolist(), index=inner_station_links.index)
     inner_station_links.drop(columns=['line_name', 'nid'], inplace=True)
 
+    # add opposite
+    _revert = inner_station_links.copy()
+    _revert.src, _revert.dst = _revert.dst, _revert.src
+    inner_station_links = pd.concat([inner_station_links, _revert])
+
+    # line_id
     inner_station_links = inner_station_links.assign(
         line_id = inner_station_links.dst.apply(lambda x: x[:-3]),
     )
+    
     inner_station_links = inner_station_links.assign(
         dst_name = 'inner_link',
         distance = DEFAULT_TRANSFER_DISTANCE,
-        duration = inner_station_links.line_id.apply(lambda x: metro.lineid_2_waiting_time[x]),
+        duration = inner_station_links.line_id.apply(lambda x: lineid_2_waiting_time[x]),
         geometry = LineString() # FIXME 可能存在不一样的坐标
-    )
+    )    
 
     return gpd.GeoDataFrame(inner_station_links, crs=4326)
 
@@ -442,7 +449,7 @@ class MetroNetwork(Network):
             df_edges.to_excel(EXP_FOLDER / f"edges.xlsx")
                 
         self.add_nodes(df_nodes)
-        self.add_edges(df_edges)
+        self.add_edges(df_edges, length='distance', duration='cost')
         
         self.nodes = self.nodes_to_dataframe()
         self.edges = self.edges_to_dataframe()
@@ -451,7 +458,7 @@ class MetroNetwork(Network):
         seg_geoms = get_edges(self.df_lines, self.df_stations, self.edges, self.nodes, keys=['src', 'dst'])
         # 换乘边
         df_connectors = get_exchange_links(self)
-        df_inner_connetors = get_station_inner_links(self.nodes)
+        df_inner_connetors = get_station_inner_links(self.nodes, self.lineid_2_waiting_time)
 
         self.edges_and_links = pd.concat(
             [seg_geoms, df_connectors.set_index(['src', 'dst']), df_inner_connetors.set_index(['src', 'dst'])], 
@@ -521,5 +528,20 @@ if __name__ == "__main__":
     # save
     to_geojson(df_edges, "../exp/shezhen_subway_edges")
     to_geojson(df_nodes, "../exp/shezhen_subway_nodes")
+
+    # %%
+    src = '440300024060032' # 福保（终点）
+    dst = '440300024060030'
+    dst = '440300024061032' # 福保（起点）
+    # dst = '440300024061002' # 益田
+
+    # metro.shortest_path(src, dst)
+    routes = metro.top_k_paths(src, dst, 3, weight='cost')
+    nodes.loc[routes[0]]
+
+
+    # %%
+    src = np.int64(src)
+    df_edges.query("src == @src or dst == @src")
 
 # %%
