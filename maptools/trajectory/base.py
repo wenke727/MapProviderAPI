@@ -1,3 +1,9 @@
+import pandas as pd
+import geopandas as gpd
+from shapely import Point, LineString
+from shapely.affinity import translate
+
+
 ACCELERATION_COL_NAME = "acceleration"
 ANGULAR_DIFFERENCE_COL_NAME = "angular_difference"
 DIRECTION_COL_NAME = "direction"
@@ -11,6 +17,8 @@ class BaseTrajectory:
     def __init__(
         self, df, traj_id, traj_id_col=None, obj_id=None,
         t=None, x=None, y=None, crs="epsg:4326", parent=None,):
+        self.points = None
+        
         raise NotImplementedError
 
     def __str__(self):
@@ -80,7 +88,7 @@ class BaseTrajectory:
         raise NotImplementedError
 
     def get_geom_col(self):
-        raise NotImplementedError
+        return self.points.geometry.name
 
     def to_linestring(self):
         raise NotImplementedError
@@ -89,9 +97,6 @@ class BaseTrajectory:
         raise NotImplementedError
 
     def to_point_gdf(self, return_orig_tz=False):
-        raise NotImplementedError
-
-    def to_line_gdf(self, columns=None):
         raise NotImplementedError
 
     def to_traj_gdf(self, wkt=False, agg=False):
@@ -154,9 +159,6 @@ class BaseTrajectory:
     def _compute_speed(self, row, conversion):
         raise NotImplementedError
 
-    def _connect_prev_pt_and_geometry(self, row):
-        raise NotImplementedError
-
     def add_traj_id(self, overwrite=False):
         raise NotImplementedError
 
@@ -215,8 +217,60 @@ class BaseTrajectory:
     def apply_offset_minutes(self, column, offset):
         raise NotImplementedError
 
-    def _to_line_df(self, columns=None):
-        raise NotImplementedError
+    def _connect_prev_pt_and_geometry(self, row, eps=1e-8):
+        pt0 = row["prev_pt"]
+        pt1 = row[self.get_geom_col()]
+        if not isinstance(pt0, Point):
+            return None
+        if not isinstance(pt1, Point):
+            raise ValueError(f"Invalid trajectory! Got {pt1} instead of point!")
+        if pt0 == pt1:
+            # to avoid intersection issues with zero length lines
+            pt1 = translate(pt1, eps, eps)
+        
+        return LineString(list(pt0.coords) + list(pt1.coords))
+    
+    def _to_line_df(self, points, columns=None):
+        """
+        Convert trajectory data GeoDataFrame of points to GeoDataFrame of lines
+        that connect consecutive points.
+
+        Returns
+        -------
+        line_df : GeoDataFrame
+            GeoDataFrame of line segments
+        """
+        if columns is None:
+            line_df = points.copy()
+        else:
+            line_df = points[columns].copy()
+        line_df["prev_pt"] = line_df.geometry.shift()
+        line_df["t"] = points.index
+        line_df["prev_t"] = line_df["t"].shift()
+        line_df["line"] = line_df.apply(self._connect_prev_pt_and_geometry, axis=1)
+        line_df = line_df.set_geometry("line")[1:]
+        return line_df
+
+    def to_line_gdf(self, points=None, columns=None):
+        """
+        Return the trajectory's line segments as GeoDataFrame.
+
+        Returns
+        -------
+        GeoDataFrame
+        """
+        if points is None:
+            points = self.points
+            
+        line_gdf = self._to_line_df(points, columns)
+        line_gdf.drop(columns=[self.get_geom_col(), "prev_pt"], inplace=True)
+        line_gdf.reset_index(drop=True, inplace=True)
+        line_gdf.rename(columns={"line": "geometry"}, inplace=True)
+        line_gdf.set_geometry("geometry", inplace=True)
+        if self.crs:
+            line_gdf.set_crs(self.crs, inplace=True)
+            
+        return line_gdf
 
     def get_mcp(self):
         raise NotImplementedError
