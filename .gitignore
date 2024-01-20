@@ -4,6 +4,7 @@ data/
 joblib_cache/
 cache/
 .DS_Store
+mapmatching
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

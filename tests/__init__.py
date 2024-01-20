@@ -1,2 +1,2 @@
 import sys
-sys.path.append('../maptools')
+sys.path.append('..')

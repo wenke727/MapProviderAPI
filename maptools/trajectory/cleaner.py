@@ -3,8 +3,8 @@ from loguru import logger
 from geopandas import GeoDataFrame
 from shapely import LineString, Point
 
-from geo.geo_utils import convert_geom_to_utm_crs
-from geo.serialization import read_csv_to_geodataframe
+from ..geo.geo_utils import convert_geom_to_utm_crs
+from ..geo.serialization import read_csv_to_geodataframe
 
 TRAJ_ID_COL = 'tid'
 
@@ -81,11 +81,11 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
     >>> cleaned_data = traj_clean_drift(trajectory_data, speed_limit=50, dis_limit=100, strict=True)
     >>> cleaned_data = traj_clean_drift(trajectory_data, method='oneside', angle_limit=45, alpha=2)
     """
-    _len = len(data)
     [Rid, Time, Geometry] = col
+    data.drop_duplicates(subset=[Rid, Time], inplace=True)
+    
     def _preprocess(data):
         df = data[col].copy()
-        df = df.drop_duplicates(subset=[Rid, Time])
         df = df.sort_values(by=[Rid, Time])
 
         if df.crs.to_epsg() == 4326:
@@ -109,9 +109,11 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
         
         return df
 
-    df = _preprocess(data)
-    op = lambda a, b: a | b if not strict else a & b
+    def op(a, b):
+        return a | b if not strict else a & b
 
+    df = _preprocess(data)
+    
     # traj mask
     traj_mask = (df[Rid + '_pre'] == df[Rid])
     if method == 'twoside':
@@ -136,7 +138,7 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
     if dis_limit is not None:
         if dis_limit == 0:
             _, dis_limit = get_outliers_thred_by_iqr(df['dis_pre'], alpha)
-            logger.debug(f"Distance limit: {speed_limit:.2f} m")
+            logger.debug(f"Distance limit: {dis_limit:.2f} m")
         if method == 'oneside':
             dis_mask = df['dis_pre'] > dis_limit
         elif method == 'twoside':
@@ -174,7 +176,6 @@ def filter_by_point_update_policy(gdf:GeoDataFrame, radius:float, keep_last=True
     Refs: 《Computing with Spatial Trajectories》
     """
     
-    
     gdf = gdf.sort_index()
     update_indices = [gdf.index[0]]
     last_update_index = gdf.index[0]
@@ -193,13 +194,13 @@ def filter_by_point_update_policy(gdf:GeoDataFrame, radius:float, keep_last=True
         
     return gdf.loc[update_indices]
 
-def simplify_traj_points(gdf, tolerance, eps=1e-6):
+def simplify_traj_points(gdf, tolerance, precision=6):
     """
     Simplify a trajectory represented as a collection of points in a GeoDataFrame,
-    while keeping track of the indices of the points that are retained. 
+    while keeping track of the indices of the points that are retained.
     This function uses the Douglas-Peucker algorithm.
 
-    Parameters
+    Parameters:
     ----------
     gdf : GeoDataFrame
         Input GeoDataFrame with 'dt' for time, 'geometry' for points, 
@@ -207,21 +208,25 @@ def simplify_traj_points(gdf, tolerance, eps=1e-6):
     tolerance : float
         Tolerance parameter for the Douglas-Peucker algorithm. 
         It determines the degree of simplification.
-    eps : float, optional
-        A small distance threshold to decide if a point is close 
-        enough to the simplified line to be included in the result. 
-        Defaults to 1e-6.
+    precision : int, optional
+        The number of decimal places to consider for comparing coordinates.
+        Defaults to 6.
 
-    Returns
+    Returns:
     -------
     GeoDataFrame
         A simplified GeoDataFrame containing only the points that are within
-        'eps' distance from the simplified trajectory.
+        'precision' decimal places of the points on the simplified trajectory.
     """
     gdf.sort_values(by='dt', inplace=True)
     simplified_line = LineString(gdf['geometry'].values).simplify(tolerance)
+    simplified_points = [tuple(np.round(p, precision)) for p in simplified_line.coords]
 
-    mask = gdf.distance(simplified_line) < eps
+    def is_near_simplified_line(point):
+        point_rounded = tuple(np.round(point.coords[0], precision))
+        return point_rounded in simplified_points
+
+    mask = gdf['geometry'].apply(is_near_simplified_line)
 
     return gdf[mask]
 

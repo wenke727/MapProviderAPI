@@ -1,4 +1,3 @@
-#%%
 import sys
 sys.path.append('../')
 
@@ -9,12 +8,12 @@ import geopandas as gpd
 from geopandas import GeoDataFrame
 import matplotlib.pyplot as plt
 
-from base import BaseTrajectory
-from cleaner import simplify_traj_points
-from cleaner import clean_drift_traj_points
-from cleaner import filter_by_point_update_policy
-from geo.serialization import read_csv_to_geodataframe
-from geo.geo_utils import convert_geom_to_utm_crs, convert_geom_to_wgs
+from .base import BaseTrajectory
+from .cleaner import simplify_traj_points
+from .cleaner import clean_drift_traj_points
+from .cleaner import filter_by_point_update_policy
+from ..geo.serialization import read_csv_to_geodataframe
+from ..geo.geo_utils import convert_geom_to_utm_crs, convert_geom_to_wgs
 
 # from utils.logger import logger_dataframe, make_logger
 
@@ -59,7 +58,7 @@ class Trajectory(BaseTrajectory):
             cur_size = len(self.points)
             logger.debug(f"Clean drift points {ori_size} -> {cur_size}, cut down {(ori_size - cur_size) / ori_size * 100:.1f}%")
         
-        return pts
+        return self.points
 
     def filter_by_point_update_policy(self, radius=500, verbose=False):
         """
@@ -81,10 +80,10 @@ class Trajectory(BaseTrajectory):
         
         return self.points
 
-    def simplify(self, tolerance=100, eps=1e-6, verbose=False):
+    def simplify(self, tolerance=100, precision=6, verbose=False):
         if verbose:
             ori_size = len(self.points)
-        self.points = simplify_traj_points(self.points, tolerance, eps)
+        self.points = simplify_traj_points(self.points, tolerance, precision)
         if verbose:
             cur_size = len(self.points)
             logger.debug(f"Simplify points {ori_size} -> {cur_size}, cut down {(ori_size - cur_size) / ori_size * 100:.1f}%")
@@ -123,7 +122,7 @@ class Trajectory(BaseTrajectory):
         return self.crs.to_epsg()
     
     def plot(self, *args, **kwargs):
-        return self.points.plot()
+        return self.points.plot(*args, **kwargs)
     
     def get_points(self, latlon=True):
         if latlon:
@@ -150,26 +149,26 @@ class Trajectory(BaseTrajectory):
         
         return fig, ax
 
-# if __name__ == "__main__":
-idx = 420
-fn = f"../../../ST-MapMatching/data/cells/{idx:03d}.csv"
+    def distance(self, other):
+        return self.raw_df.distance(other)
+    
+    def align_crs(self, gdf:gpd.GeoDataFrame):
+        if gdf.crs == self.crs:
+            return gdf
+        
+        return gdf.to_crs(self.crs)
+        
 
-pts = read_csv_to_geodataframe(fn)
-self = traj = Trajectory(pts, traj_id=1)
+if __name__ == "__main__":
+    idx = 0
+    fn = f"../../../ST-MapMatching/data/cells/{idx:03d}.csv"
 
-traj.preprocess(radius=300, 
-                speed_limit=0, dis_limit=0, angle_limit=45, alpha=2, 
-                tolerance=300,
-                strict=False, verbose=True, plot=True)
+    pts = read_csv_to_geodataframe(fn)
+    self = traj = Trajectory(pts, traj_id=1)
 
-# logger_dataframe(traj.points)
-
-
-# %%
-_df = simplify_traj_points(self.points, 300)
-
-ax = self.points.plot(color='r', marker='x')
-_df.plot(ax=ax, color='b')
-
-
-# %%
+    traj.preprocess(
+        radius=300, 
+        speed_limit=0, dis_limit=0, angle_limit=45, alpha=2, strict=False, 
+        tolerance=300,
+        verbose=True, plot=True
+    )

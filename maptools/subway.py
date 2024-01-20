@@ -16,7 +16,7 @@ from geo.coords_utils import str_to_point, xsys_str_to_linestring
 from provider.busline import get_bus_line, parse_line_and_stops
 from cfg import KEY, MEMORY, LL_SYS
 
-logger = make_logger('../cache', 'subway')
+logger = make_logger('../cache', 'subway', console=True)
 
 
 SPECIAL_CASE = {
@@ -41,7 +41,6 @@ BAD_CASE ={
     ('3307', "金义东线金义段"): "jinhua", # 金华
 }
 
-@MEMORY.cache
 def get_subway_cities_list(timestamp=None):
     """
     Fetch the list of cities with subway systems from AMAP (https://map.amap.com/subway/index.html)
@@ -83,7 +82,6 @@ def get_subway_cities_list(timestamp=None):
 
     return df
 
-@MEMORY.cache
 def get_city_subway_lines(city_info, timestamp=None):
     """
     Retrieves a list of subway lines for a specified city from AMAP and converts it to a DataFrame.
@@ -129,25 +127,29 @@ def get_city_subway_lines(city_info, timestamp=None):
     except (KeyError, ValueError) as e:
         raise e
 
-    logger.debug(f"{url}\n\tLines: {df.ln.values.tolist()}")
+    logger.debug(f"City: {city_info.get('cityname', None)}, Lines: {df.ln.values.tolist()}, url: {url}")
     
     return df
 
-def get_all_subways_in_China(filename):
-    if os.path.exists(filename):
+def get_national_subways(filename, refresh=False, auto_save=False):
+    if os.path.exists(filename) and not refresh:
         return load_checkpoint(filename)
     
+    # timestamp = int(time.time() * 1000)
     cities = get_subway_cities_list()
 
     res = {}
     for i, city in cities.iterrows():
         lines = get_city_subway_lines(city)
-        res[city['spell']] = {"df": lines, 
-                              "lines": lines['ln'].values.tolist(), 
-                              **city.to_dict()}
-        # time.sleep(random.uniform(2, 8))
+        res[city['spell']] = {
+            "df": lines, 
+            "lines": lines['ln'].values.tolist(), 
+            **city.to_dict()
+        }
+        time.sleep(random.uniform(.5, 6))
 
-    save_checkpoint(res, filename)
+    if auto_save:
+        save_checkpoint(res, filename)
 
     return res
 
@@ -254,7 +256,7 @@ def parse_amap_web_search_response(fn, ll='wgs'):
 
 def pipeline_subway_data(folder="../data/subway/", round=1):
     folder = Path(folder)
-    df_lines = get_all_subways_in_China(folder / "China_subways.pkl")
+    df_lines = get_national_subways(folder / "China_subways.pkl")
     citycode_2_cityname = {val['adcode']: key for key, val in df_lines.items()}
     
     COUNT = 0
@@ -307,3 +309,52 @@ def pipeline_subway_data(folder="../data/subway/", round=1):
 if __name__ == "__main__":
     pipeline_subway_data(folder="../data/subway/", round=1)
     pipeline_subway_data(folder="../data/subway/", round=2)
+
+#%%
+folder="../data/subway/"
+folder = Path(folder)
+df_lines = get_national_subways(folder / "China_subways-240116.pkl", refresh=False, auto_save=True)
+
+
+
+#%%
+city = 'shenzhen'
+# city = 'beijing'
+
+df_lines[city].keys()
+df  = df_lines[city]['df']
+df.head(1)
+
+# %%
+line_rename_dict = {
+   'ln': "line_name",
+   'kn': 'full_name',
+   'ls': 'line_id', # key
+   'su': 'status',
+   'cl': 'color',
+   'li': 'line_id_lst',
+   'st': 'stations',
+   'x': 'x'
+}
+
+station_rename_dict = {
+ 'n': 'name',
+ 'sid': 'nid',
+ 'poiid': 'bvid',
+} # bvid 用于检测是否存在
+
+df = df[line_rename_dict.keys()].rename(columns=line_rename_dict)
+df
+
+# %%
+
+
+# TODO 转换成`点`和`边`的关系
+stops = df['stations'].explode()
+df_stations = pd.json_normalize(stops)
+
+df_stations = df_stations[station_rename_dict.keys()].rename(columns=station_rename_dict)
+df_stations.loc[:, 'line_id'] = stops.index
+df_stations
+
+# %%
