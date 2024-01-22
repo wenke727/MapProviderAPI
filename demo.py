@@ -20,6 +20,8 @@ from mapmatching.utils.logger_helper import logger_dataframe, make_logger
 from mapmatching.geo.io import read_csv_to_geodataframe, to_geojson
 
 
+UTM_CRS = None
+
 #%%
 
 def _plot_temporal_prob_dist(actual_duration, avg_duration, min_duration):
@@ -86,10 +88,13 @@ def trim_first_and_last_step(res, eps=.1):
     path =path.iloc[start: end +1]
     2. 针对首尾是否 exchange 的情况删除
     """
+    df_path = df_edges.loc[res['epath']]
+    if res['status'] != 0:
+        return df_path
+    
     start = 0 if res['step_0'] < eps else 1
     end = len(res['epath']) - 2 if res['step_n'] < eps else len(res['epath']) - 1
 
-    df_path = df_edges.loc[res['epath']]
     if df_path.iloc[start].dst_name in ['exchange',  'inner_link']:
         start += 1
     if df_path.iloc[end].dst_name in ['exchange',  'inner_link']:
@@ -182,6 +187,7 @@ def process_path_data(df):
     return gpd.GeoDataFrame(result)
 
 def load_mapmather():
+    global UTM_CRS
     df_nodes = gpd.read_file('../MapTools/exp/shezhen_subway_nodes.geojson')
     df_edges = gpd.read_file('../MapTools/exp/shezhen_subway_edges.geojson')
 
@@ -189,9 +195,10 @@ def load_mapmather():
         dist = df_edges['distance'],
         geometry = df_edges.geometry.fillna(LineString())
     )
-
+    
     net = GeoDigraph(df_edges, df_nodes.set_index('nid'), weight='duration')
-    matcher = ST_Matching(net=net, ll=False, loc_deviaction=200)
+    matcher = ST_Matching(net=net, ll=False, loc_deviaction=180)
+    UTM_CRS = matcher.crs_prj
     
     return matcher, net, df_edges, df_nodes
 
@@ -220,14 +227,13 @@ if __name__ == '__main__':
     folder = Path('./exp/231206/0800/')
     fns = sorted(glob.glob(f"{folder}/*.csv"))
 
-
 #%%
-def pipeline(fn):
+def pipeline(fn, plot_time_dist=False):
     # read
     pts = read_csv_to_geodataframe(fn)
 
     # preprocess
-    self = traj = Trajectory(pts, traj_id=1)
+    self = traj = Trajectory(pts, traj_id=1, utm_crs=UTM_CRS)
     traj.preprocess(
         radius=500, 
         speed_limit=0, dis_limit=None, angle_limit=60, alpha=2, strict=False, 
@@ -244,16 +250,18 @@ def pipeline(fn):
         simplify=False, tolerance=500, debug_in_levels=False
     )
 
-    if res['status'] != 0:
-        return traj, res
-    
-    # visualize
-    plot_helper(traj, matcher, res, Path(fn).name)
+    if res['status'] not in [0, 4]:
+        print("status: ", res['status'])
+        return traj, res, pd.DataFrame()
 
-    # metric, 计算轨迹分数：时间、空间 以及 Cell
-    df_path = df_edges.loc[res['epath']]
+    df_path = traj.align_crs(df_edges.loc[res['epath']])
     route = merge_linestrings(df_path.geometry)
 
+    # visualize
+    df_path = trim_first_and_last_step(res, eps=0.1)
+    plot_helper(traj, matcher, res, Path(fn).name)
+        
+    # metric, 计算轨迹分数：时间、空间 以及 Cell
     # dists = traj.distance(gpd.GeoSeries(route, crs=df_path.crs))
     dists = traj.distance(route)
     cell_dis_prob = (dists < 300).mean()
@@ -261,35 +269,31 @@ def pipeline(fn):
     dist_dict = dists.describe().to_dict()
     res['probs'] = {**res['probs'], 'cell_dis_prob': cell_dis_prob, } # **dist_dict
 
-    return traj, res
+    #! travel time probs
+    actual_duration, min_duration, avg_duration, temporal_prob = get_time_params(traj, df_path, lineid_2_waitingtime)
+    # df_path.duration.sum(), df_path.duration.sum() / 60
+    if plot_time_dist:
+        _plot_temporal_prob_dist(actual_duration, avg_duration, min_duration)
 
-idx = 4
+    res['probs']['temporal_prob'] = temporal_prob
+
+    return traj, res, df_path.drop(columns=['geometry', 'dir', 'distance'])
+
+idx = 11
 fn = fns[idx]
-traj, res = pipeline(fn)
-
-df_path = trim_first_and_last_step(res, eps=0.1)
-df_path.drop(columns=['geometry', 'dir', 'distance'])
-
-actual_duration, min_duration, avg_duration, temporal_prob = get_time_params(traj, df_path, lineid_2_waitingtime)
-
-res['probs']['temporal_prob'] = temporal_prob
+traj, res, route = pipeline(fn, plot_time_dist=True)
 
 probs = pd.DataFrame([res['probs']])
 probs
 
-# %%
-#! travel time probs
-_plot_temporal_prob_dist(actual_duration, avg_duration, min_duration)
-df_path.duration.sum(), df_path.duration.sum() / 60
 
 
 # %%
-temporal_prob
-
-
-# %%
+plot_geodata(traj.points.to_crs(4326))
 
 # df_path = df_edges.loc[res['epath']]
 # df_combined_path = process_path_data(df_path)
 # df_combined_path
 
+
+# %%

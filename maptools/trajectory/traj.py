@@ -25,13 +25,14 @@ TRAJ_ID_COL = "tid"
 
 class Trajectory(BaseTrajectory):
     def __init__(self, df:gpd.GeoDataFrame, traj_id:int, traj_id_col=TRAJ_ID_COL, obj_id=None, 
-                 t=None, x=None, y=None, geometry='geometry', crs="epsg:4326", parent=None,
+                 t=None, x=None, y=None, geometry='geometry', utm_crs=None, parent=None,
                  latlon=False):
         assert not (x is None and y is None) or geometry is not None, "Check Coordination"
         self.raw_df = df
         self.latlon = latlon
+        self.utm_crs = utm_crs
         if self.latlon is False:
-            self.raw_df = convert_geom_to_utm_crs(self.raw_df)
+            self.raw_df = convert_geom_to_utm_crs(self.raw_df, utm_crs)
 
         self.points = self.raw_df.copy()
                 
