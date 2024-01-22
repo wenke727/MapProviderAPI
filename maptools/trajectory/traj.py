@@ -150,6 +150,7 @@ class Trajectory(BaseTrajectory):
         return fig, ax
 
     def distance(self, other):
+        # other = self.align_crs(other)
         return self.raw_df.distance(other)
     
     def align_crs(self, gdf:gpd.GeoDataFrame):
