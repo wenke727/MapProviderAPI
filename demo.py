@@ -345,7 +345,10 @@ probs.to_excel(out_foler / 'probs.xlsx', index=False)
 
 to_geojson(gpd.GeoDataFrame(pd.concat(raw_points_res), geometry='geometry'), out_foler / 'raw_points')
 to_geojson(gpd.GeoDataFrame(pd.concat(points_res), geometry='geometry'), out_foler / 'points')
-to_geojson(gpd.GeoDataFrame(pd.concat(path_res), geometry='geometry'), out_foler / 'routes')
+
+df_routes = gpd.GeoDataFrame(pd.concat(path_res), geometry='geometry')
+df_routes.loc[:, 'eid'] = df_routes['eid'].astype(str)
+to_geojson(df_routes, out_foler / 'routes')
 
 #%%
 plot_geodata(traj.points.to_crs(4326))
