@@ -202,7 +202,7 @@ def load_mapmather():
     )
     
     net = GeoDigraph(df_edges, df_nodes.set_index('nid'), weight='duration')
-    matcher = ST_Matching(net=net, ll=False, loc_deviaction=180, prob_thres=.5)
+    matcher = ST_Matching(net=net, ll=False, loc_deviaction=180, prob_thres=.0)
     # FIXME 
     UTM_CRS = matcher.utm_crs
     logger.warning(f"crs: {UTM_CRS}")
@@ -211,7 +211,7 @@ def load_mapmather():
 
 def plot_helper(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None, x_label=None):
     fig, ax = matcher.plot_result(traj.points.to_crs(4326), res)
-    traj.raw_df.to_crs(4326).plot(ax=ax, color='b', alpha=.5, marker='x', zorder=1)
+    traj.raw_df.to_crs(4326).plot(ax=ax, color='b', alpha=.3, marker='x', zorder=1)
 
     segs = traj.to_line_gdf().to_crs(4326)
     segs.plot(ax=ax, color='b', alpha=.6, linestyle=':', zorder=2)
@@ -227,21 +227,9 @@ def plot_helper(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None,
         
     return fig, ax
 
-
-if __name__ == '__main__':
-    matcher, net, df_edges, df_nodes = load_mapmather()
-    lineid_2_waitingtime = df_edges[['way_id', 'duration', 'dst_name']]\
-                                   .query(" dst_name == 'inner_link' ")\
-                                   .drop_duplicates()\
-                                   .set_index('way_id').to_dict()['duration']
-
-    folder = Path('./exp/231206/0800/')
-    fns = sorted(glob.glob(f"{folder}/*.csv"))
-
-#%%
-def pipeline(points, plot_time_dist=False, dist_eps=300, to_img=None):
+def pipeline(pts, traj_id, plot_time_dist=False, dist_eps=200, to_img=None):
     # preprocess
-    self = traj = Trajectory(points, traj_id=1, utm_crs=UTM_CRS)
+    traj = Trajectory(pts, traj_id=traj_id, utm_crs=UTM_CRS)
     traj.preprocess(
         radius=600, 
         speed_limit=0, dis_limit=None, angle_limit=60, alpha=2, strict=False, 
@@ -257,12 +245,13 @@ def pipeline(points, plot_time_dist=False, dist_eps=300, to_img=None):
         dir_trans=False, 
         details=False, 
         plot=False, 
-        simplify=False, tolerance=500, 
+        simplify=False,
         debug_in_levels=False
     )
 
-    if res['status'] not in [0, 4]:
+    if len(res.get('epath', [])) == 0:
         print("status: ", res['status'])
+        logger.warning("No candidates/轨迹点无法映射到候选边上")
         return traj, res, pd.DataFrame()
 
     df_path = traj.align_crs(df_edges.loc[res['epath']])
@@ -275,7 +264,7 @@ def pipeline(points, plot_time_dist=False, dist_eps=300, to_img=None):
     dists = traj.distance(route)
     cell_dis_prob = (dists < dist_eps).mean()
     # dist_dict = dists.describe().to_dict()
-    res['probs'] = {**res['probs'], 'cell_dis_prob': cell_dis_prob, } # **dist_dict
+    res['probs'] = {**res['probs'], 'cell_dis_prob': cell_dis_prob} # **dist_dict
 
     #! travel time probs
     actual_duration, min_duration, avg_duration, temporal_prob = get_time_params(traj, df_path, lineid_2_waitingtime)
@@ -288,22 +277,77 @@ def pipeline(points, plot_time_dist=False, dist_eps=300, to_img=None):
     end = df_path.iloc[-1].dst_name
     trip_info = f" {start} -> {end}, {actual_duration:.0f} / {avg_duration:.0f} s"
     fig, ax = plot_helper(traj, matcher, res, f"{Path(fn).name}\n{trip_info}")
+    if to_img:
+        fig.savefig(to_img, bbox_inches='tight', pad_inches=0.1, dpi=500)
+        plt.close()
+    
     logger.debug(res)
     
-    return traj, res, df_path.drop(columns=['geometry', 'dir', 'distance'])
+    return traj, res, df_path.drop(columns=['dir', 'distance'])
 
-idx = 8
-fn = fns[idx]
 
-# read
-logger.info(f"processing: {fn}")
-pts = read_csv_to_geodataframe(fn)
-traj, res, route = pipeline(pts, plot_time_dist=False)
+if __name__ == '__main__':
+    matcher, net, df_edges, df_nodes = load_mapmather()
+    lineid_2_waitingtime = df_edges[['way_id', 'duration', 'dst_name']]\
+                                   .query(" dst_name == 'inner_link' ")\
+                                   .drop_duplicates()\
+                                   .set_index('way_id').to_dict()['duration']
 
-probs = pd.DataFrame([res['probs']])
-probs
 
-# %%
+
+#%%
+# TODO 同一条的概率， 8
+# idx = 2
+
+
+folder = Path('./exp/231206/0800/')
+out_foler = Path('./exp/output')
+
+img_fodler = out_foler / 'imgs'
+out_foler.mkdir(parents=True, exist_ok=True)
+img_fodler.mkdir(parents=True, exist_ok=True)
+
+fns = sorted(glob.glob(f"{folder}/*.csv"))
+matching_res = []
+raw_points_res = []
+points_res = []
+path_res= []
+
+for fn in fns:
+    try:
+        fn_name = Path(fn).name.split('.')[0]
+        to_img = img_fodler / f'{fn_name}.jpg'
+        traj_id = int(fn_name)
+
+        # read
+        logger.info(f"processing: {fn}")
+        pts = read_csv_to_geodataframe(fn)
+
+        traj, res, route = pipeline(pts, traj_id=traj_id, plot_time_dist=False, to_img=to_img)
+        
+        # collect geojson
+        traj.raw_df.loc[:, 'traj_id'] = int(fn_name)
+        raw_points_res.append(traj.raw_df)
+        points_res.append(traj.points)
+        route.loc[:, 'traj_id'] = int(fn_name)
+        path_res.append(route)
+
+        # collect probs
+        res['probs'] = {"fn": fn, **res['probs']}
+        matching_res.append(res['probs'])
+    except:
+        logger.error(fn)
+
+probs = pd.DataFrame(matching_res)
+probs.rename(columns={'prob': 'status'}, inplace=True)
+probs.loc[:, 'status'] = ''
+probs.to_excel(out_foler / 'probs.xlsx', index=False)
+
+to_geojson(gpd.GeoDataFrame(pd.concat(raw_points_res), geometry='geometry'), out_foler / 'raw_points')
+to_geojson(gpd.GeoDataFrame(pd.concat(points_res), geometry='geometry'), out_foler / 'points')
+to_geojson(gpd.GeoDataFrame(pd.concat(path_res), geometry='geometry'), out_foler / 'routes')
+
+#%%
 plot_geodata(traj.points.to_crs(4326))
 
 # df_path = df_edges.loc[res['epath']]
