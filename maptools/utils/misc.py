@@ -1,10 +1,8 @@
-#%%
-import sys
 import json
 import platform
-import numpy as np
 import pandas as pd
-
+import platform
+import matplotlib.pyplot as plt
 
 def detect_os():
     os_name = platform.system()
@@ -64,6 +62,24 @@ def convert_timestamps(geodataframe, timestamp_column, unit='ms', timezone='Asia
         geodataframe['strftime'] = geodataframe[timestamp_column].dt.strftime(strftime)
 
     return geodataframe
+
+
+def set_chinese_font_style():
+    # Detect the operating system
+    system_name = platform.system()
+
+    # Set font for Windows
+    if system_name == 'Windows':
+        plt.rcParams['font.sans-serif'] = ['SimHei']
+    # Set font for Linux
+    elif system_name == 'Linux':
+        plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    # Set font for Mac
+    elif system_name == 'Darwin':  # Darwin is the name of macOS's underlying system
+        plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']
+
+    # Set the property to display the minus sign correctly
+    plt.rcParams['axes.unicode_minus'] = False
 
 
 if __name__ == "__main__":

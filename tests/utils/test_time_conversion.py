@@ -7,7 +7,7 @@ from maptools.utils.time_conversion import convert_timestamp_to_datetime64, conv
 def test_convert_timestamp_to_datetime64():
     # 测试时间戳转换函数
     timestamp_series = pd.Series([1609459200000, 1609545600000])
-    result = convert_timestamp_to_datetime64(timestamp_series, timezone_offset=8, timestamp_unit='ms', precision='s')
+    result = convert_timestamp_to_datetime64(timestamp_series, timezone_offset=8, timestamp_unit='ms', precision='s', drop_tz=False)
     logger.debug(f"\n{result}")
     
     # 时区的信息会过滤掉
@@ -17,7 +17,7 @@ def test_convert_timestamp_to_datetime64():
 def test_convert_str_to_datetime64():
     # 测试字符串转换函数
     str_series = pd.Series(['20231219181940879', '20231220081940879'])
-    result = convert_str_to_datetime64(str_series, '%Y%m%d%H%M%S%f', timezone_offset=8, precision='s')
+    result = convert_str_to_datetime64(str_series, '%Y%m%d%H%M%S%f', timezone_offset=8, precision='s', drop_tz=False)
     assert (result.dt.tz == pd.Timestamp('2023-12-19', tz='Etc/GMT-8').tz), "Timezone conversion failed"
     
     assert all(result.apply(lambda x: x.strftime('%Y-%m-%d %H:%M:%S')).isin(['2023-12-19 18:19:40', '2023-12-20 08:19:40'])), "String conversion failed"

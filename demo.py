@@ -14,12 +14,16 @@ from tilemap import plot_geodata
 from maptools.trajectory import Trajectory
 from maptools.geo.serialization import read_csv_to_geodataframe
 
-from mapmatching.graph import GeoDigraph
 from mapmatching import ST_Matching
-from mapmatching.utils.logger_helper import logger_dataframe, make_logger
+from mapmatching.graph import GeoDigraph
 from mapmatching.geo.io import read_csv_to_geodataframe, to_geojson
 
+from maptools.utils.misc import set_chinese_font_style
+from maptools.utils.logger import make_logger, logger_dataframe
 
+logger = make_logger('./exp/231206', 'cell', console=True, include_timestamp=False)
+
+set_chinese_font_style()
 UTM_CRS = None
 
 #%%
@@ -51,7 +55,7 @@ def cal_temporal_prob(actual_duration, avg_duration, min_duration, factor=5, bia
     :param sigma: 标准差
     :return: 给定实际通行时间的可能性
     """
-    if min_duration > actual_duration:
+    if min_duration * .95 > actual_duration:
         return 0
     
     sigma = avg_duration - min_duration + bias
@@ -80,7 +84,7 @@ def get_time_params(traj, df_path, lineid_2_waitingtime):
     
     return actual_duration, min_duration, avg_duration, temporal_prob
 
-def trim_first_and_last_step(res, eps=.1):
+def trim_first_and_last_step(df_path, res, eps=.2):
     # 裁剪首尾段
     """
     1. 注意 end 下标的问题
@@ -93,14 +97,15 @@ def trim_first_and_last_step(res, eps=.1):
         return df_path
     
     start = 0 if res['step_0'] < eps else 1
-    end = len(res['epath']) - 2 if res['step_n'] < eps else len(res['epath']) - 1
+    _len  = len(res['epath']) 
+    end = _len - 2 if res['step_n'] < eps else _len - 1
 
     if df_path.iloc[start].dst_name in ['exchange',  'inner_link']:
         start += 1
     if df_path.iloc[end].dst_name in ['exchange',  'inner_link']:
         end -= 1
         
-    df_path = df_path.iloc[start: end +1]
+    df_path = df_path.iloc[start: end + 1]
     df_combined_path = process_path_data(df_path)
     
     return df_combined_path
@@ -197,12 +202,14 @@ def load_mapmather():
     )
     
     net = GeoDigraph(df_edges, df_nodes.set_index('nid'), weight='duration')
-    matcher = ST_Matching(net=net, ll=False, loc_deviaction=180)
-    UTM_CRS = matcher.crs_prj
+    matcher = ST_Matching(net=net, ll=False, loc_deviaction=180, prob_thres=.5)
+    # FIXME 
+    UTM_CRS = matcher.utm_crs
+    logger.warning(f"crs: {UTM_CRS}")
     
     return matcher, net, df_edges, df_nodes
 
-def plot_helper(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None):
+def plot_helper(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None, x_label=None):
     fig, ax = matcher.plot_result(traj.points.to_crs(4326), res)
     traj.raw_df.to_crs(4326).plot(ax=ax, color='b', alpha=.5, marker='x', zorder=1)
 
@@ -215,6 +222,10 @@ def plot_helper(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None)
 
     if title:
         ax.set_title(title)
+    if x_label:
+        ax.set_xlabel(x_label)
+        
+    return fig, ax
 
 
 if __name__ == '__main__':
@@ -228,14 +239,11 @@ if __name__ == '__main__':
     fns = sorted(glob.glob(f"{folder}/*.csv"))
 
 #%%
-def pipeline(fn, plot_time_dist=False):
-    # read
-    pts = read_csv_to_geodataframe(fn)
-
+def pipeline(points, plot_time_dist=False, dist_eps=300, to_img=None):
     # preprocess
-    self = traj = Trajectory(pts, traj_id=1, utm_crs=UTM_CRS)
+    self = traj = Trajectory(points, traj_id=1, utm_crs=UTM_CRS)
     traj.preprocess(
-        radius=500, 
+        radius=600, 
         speed_limit=0, dis_limit=None, angle_limit=60, alpha=2, strict=False, 
         tolerance=200,
         verbose=False, 
@@ -246,8 +254,11 @@ def pipeline(fn, plot_time_dist=False):
     res = matcher.matching(
         traj.points.to_crs(4326), 
         search_radius=500, top_k=8,
-        dir_trans=False, details=True, plot=False, 
-        simplify=False, tolerance=500, debug_in_levels=False
+        dir_trans=False, 
+        details=False, 
+        plot=False, 
+        simplify=False, tolerance=500, 
+        debug_in_levels=False
     )
 
     if res['status'] not in [0, 4]:
@@ -255,38 +266,42 @@ def pipeline(fn, plot_time_dist=False):
         return traj, res, pd.DataFrame()
 
     df_path = traj.align_crs(df_edges.loc[res['epath']])
-    route = merge_linestrings(df_path.geometry)
 
     # visualize
-    df_path = trim_first_and_last_step(res, eps=0.1)
-    plot_helper(traj, matcher, res, Path(fn).name)
+    df_path = trim_first_and_last_step(df_path, res, eps=0.2)
         
     # metric, 计算轨迹分数：时间、空间 以及 Cell
-    # dists = traj.distance(gpd.GeoSeries(route, crs=df_path.crs))
+    route = merge_linestrings(df_path.geometry)
     dists = traj.distance(route)
-    cell_dis_prob = (dists < 300).mean()
-    # sns.boxplot(traj.distance(route))
-    dist_dict = dists.describe().to_dict()
+    cell_dis_prob = (dists < dist_eps).mean()
+    # dist_dict = dists.describe().to_dict()
     res['probs'] = {**res['probs'], 'cell_dis_prob': cell_dis_prob, } # **dist_dict
 
     #! travel time probs
     actual_duration, min_duration, avg_duration, temporal_prob = get_time_params(traj, df_path, lineid_2_waitingtime)
-    # df_path.duration.sum(), df_path.duration.sum() / 60
     if plot_time_dist:
         _plot_temporal_prob_dist(actual_duration, avg_duration, min_duration)
 
     res['probs']['temporal_prob'] = temporal_prob
 
+    start = df_path.iloc[0].src_name
+    end = df_path.iloc[-1].dst_name
+    trip_info = f" {start} -> {end}, {actual_duration:.0f} / {avg_duration:.0f} s"
+    fig, ax = plot_helper(traj, matcher, res, f"{Path(fn).name}\n{trip_info}")
+    logger.debug(res)
+    
     return traj, res, df_path.drop(columns=['geometry', 'dir', 'distance'])
 
-idx = 11
+idx = 8
 fn = fns[idx]
-traj, res, route = pipeline(fn, plot_time_dist=True)
+
+# read
+logger.info(f"processing: {fn}")
+pts = read_csv_to_geodataframe(fn)
+traj, res, route = pipeline(pts, plot_time_dist=False)
 
 probs = pd.DataFrame([res['probs']])
 probs
-
-
 
 # %%
 plot_geodata(traj.points.to_crs(4326))
