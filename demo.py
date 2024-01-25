@@ -6,6 +6,7 @@ import seaborn as sns
 from copy import copy
 import geopandas as gpd
 from pathlib import Path
+from loguru import logger
 import matplotlib.pyplot as plt
 from shapely.ops import linemerge
 from shapely import LineString, MultiLineString
@@ -21,7 +22,6 @@ from mapmatching.geo.io import read_csv_to_geodataframe, to_geojson
 from maptools.utils.misc import set_chinese_font_style
 from maptools.utils.logger import make_logger, logger_dataframe
 
-logger = make_logger('./exp/231206', 'cell', console=True, include_timestamp=False)
 
 set_chinese_font_style()
 UTM_CRS = None
@@ -55,7 +55,7 @@ def cal_temporal_prob(actual_duration, avg_duration, min_duration, factor=5, bia
     :param sigma: 标准差
     :return: 给定实际通行时间的可能性
     """
-    if min_duration * .95 > actual_duration:
+    if min_duration * .75 > actual_duration:
         return 0
     
     sigma = avg_duration - min_duration + bias
@@ -86,12 +86,6 @@ def get_time_params(traj, df_path, lineid_2_waitingtime):
 
 def trim_first_and_last_step(df_path, res, eps=.2):
     # 裁剪首尾段
-    """
-    1. 注意 end 下标的问题
-    if path.iloc[end].dst_name  in ['exchange',  'inner_link']
-    path =path.iloc[start: end +1]
-    2. 针对首尾是否 exchange 的情况删除
-    """
     df_path = df_edges.loc[res['epath']]
     if res['status'] != 0:
         return df_path
@@ -104,7 +98,15 @@ def trim_first_and_last_step(df_path, res, eps=.2):
         start += 1
     if df_path.iloc[end].dst_name in ['exchange',  'inner_link']:
         end -= 1
-        
+    
+    # update `res`
+    res['epath'] = res['epath'][start: end + 1]
+    if start != 0:
+        res['step_0'] = 0
+    if end != _len - 1:
+        res['step_n'] = 1
+    
+    # update `path`
     df_path = df_path.iloc[start: end + 1]
     df_combined_path = process_path_data(df_path)
     
@@ -211,14 +213,29 @@ def load_mapmather():
 
 def plot_helper(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None, x_label=None):
     fig, ax = matcher.plot_result(traj.points.to_crs(4326), res)
-    traj.raw_df.to_crs(4326).plot(ax=ax, color='b', alpha=.3, marker='x', zorder=1)
+    traj.raw_df.to_crs(4326).plot(ax=ax, color='b', alpha=.4, marker='x', zorder=1)
 
     segs = traj.to_line_gdf().to_crs(4326)
     segs.plot(ax=ax, color='b', alpha=.6, linestyle=':', zorder=2)
 
     _pts = traj.points.to_crs(4326)
-    _pts.iloc[1:].plot(ax=ax, color='b', facecolor='white', zorder=5)
-    _pts.iloc[[-1]].plot(ax=ax, color='b', zorder=6)
+    _pts.iloc[1:].plot(ax=ax, color='b', facecolor='white')
+    _pts.iloc[[-1]].plot(ax=ax, color='b')
+
+    # plot od name
+    net = matcher.net
+    src_idx = net.get_edge(res['epath'][0], 'src')
+    dst_idx = net.get_edge(res['epath'][-1], 'dst')
+    od = net.get_node([src_idx, dst_idx]).to_crs(4326)
+    xmin, xmax, ymin, ymax = ax.axis()
+    delta_y = (ymax - ymin) / 50
+    for i, p in od.iterrows():
+        ax.text(
+            p.geometry.x, p.geometry.y + delta_y, p['name'], transform=ax.transData,
+            bbox=dict(facecolor='white', alpha=0.4, edgecolor='none', boxstyle="round,pad=0.5"),
+            va='bottom', 
+            ha='center',
+        )
 
     if title:
         ax.set_title(title)
@@ -227,12 +244,12 @@ def plot_helper(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None,
         
     return fig, ax
 
-def pipeline(pts, traj_id, plot_time_dist=False, dist_eps=200, to_img=None):
+def pipeline(pts, traj_id, plot_time_dist=False, dist_eps=200, to_img=None, title=''):
     # preprocess
     traj = Trajectory(pts, traj_id=traj_id, utm_crs=UTM_CRS)
     traj.preprocess(
         radius=600, 
-        speed_limit=0, dis_limit=None, angle_limit=60, alpha=2, strict=False, 
+        speed_limit=0, dis_limit=None, angle_limit=45, alpha=1, strict=False, 
         tolerance=200,
         verbose=False, 
         plot=False
@@ -263,7 +280,6 @@ def pipeline(pts, traj_id, plot_time_dist=False, dist_eps=200, to_img=None):
     route = merge_linestrings(df_path.geometry)
     dists = traj.distance(route)
     cell_dis_prob = (dists < dist_eps).mean()
-    # dist_dict = dists.describe().to_dict()
     res['probs'] = {**res['probs'], 'cell_dis_prob': cell_dis_prob} # **dist_dict
 
     #! travel time probs
@@ -272,11 +288,17 @@ def pipeline(pts, traj_id, plot_time_dist=False, dist_eps=200, to_img=None):
         _plot_temporal_prob_dist(actual_duration, avg_duration, min_duration)
 
     res['probs']['temporal_prob'] = temporal_prob
-
+    for p in ['trans_prob', 'prob']:
+        if p in res['probs']:
+            del res['probs'][p]
+    
     start = df_path.iloc[0].src_name
     end = df_path.iloc[-1].dst_name
-    trip_info = f" {start} -> {end}, {actual_duration:.0f} / {avg_duration:.0f} s"
-    fig, ax = plot_helper(traj, matcher, res, f"{Path(fn).name}\n{trip_info}")
+    trip_info = f" \n{start} -> {end}\n{actual_duration/60:.1f} min"\
+                f" / [{min_duration/60:.1f}, {avg_duration/60:.1f}, "\
+                f"{(min_duration + (avg_duration - min_duration) * 2) / 60:.1f}]"
+    fig, ax = plot_helper(traj, matcher, res, f"{title}, {trip_info}")
+    
     if to_img:
         fig.savefig(to_img, bbox_inches='tight', pad_inches=0.1, dpi=500)
         plt.close()
@@ -296,18 +318,26 @@ if __name__ == '__main__':
 
 
 #%%
-# TODO 同一条的概率， 8
-# idx = 2
 
-
-folder = Path('./exp/231206/0800/')
-out_foler = Path('./exp/output')
+folder = Path('./exp/12-06/0800/csv')
+# folder = Path('./exp/12-08/0800/csv')
+out_foler = folder / '../'
+logger = make_logger(out_foler, 'cell', console=True, include_timestamp=False)
 
 img_fodler = out_foler / 'imgs'
 out_foler.mkdir(parents=True, exist_ok=True)
 img_fodler.mkdir(parents=True, exist_ok=True)
 
 fns = sorted(glob.glob(f"{folder}/*.csv"))
+
+# traj_id = 2
+# fn = fns[traj_id]
+# pts = read_csv_to_geodataframe(fn)
+# traj, res, route = pipeline(pts, traj_id=traj_id, plot_time_dist=False, title=Path(fn).name, to_img=False)
+
+
+#%%
+
 matching_res = []
 raw_points_res = []
 points_res = []
@@ -323,14 +353,16 @@ for fn in fns:
         logger.info(f"processing: {fn}")
         pts = read_csv_to_geodataframe(fn)
 
-        traj, res, route = pipeline(pts, traj_id=traj_id, plot_time_dist=False, to_img=to_img)
+        traj, res, route = pipeline(pts, traj_id=traj_id, plot_time_dist=False, title=Path(fn).name, to_img=to_img)
         
         # collect geojson
         traj.raw_df.loc[:, 'traj_id'] = int(fn_name)
         raw_points_res.append(traj.raw_df)
-        points_res.append(traj.points)
-        route.loc[:, 'traj_id'] = int(fn_name)
-        path_res.append(route)
+        if not traj.points.empty:
+            points_res.append(traj.points)
+        if not route.empty:
+            route.loc[:, 'traj_id'] = int(fn_name)
+            path_res.append(route)
 
         # collect probs
         res['probs'] = {"fn": fn, **res['probs']}
@@ -351,7 +383,6 @@ df_routes.loc[:, 'eid'] = df_routes['eid'].astype(str)
 to_geojson(df_routes, out_foler / 'routes')
 
 #%%
-plot_geodata(traj.points.to_crs(4326))
 
 # df_path = df_edges.loc[res['epath']]
 # df_combined_path = process_path_data(df_path)
