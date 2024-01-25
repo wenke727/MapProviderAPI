@@ -50,6 +50,6 @@ def make_logger(folder, filename=None, level='DEBUG', mode='w', console=True,
     
     return logger
 
-def logger_dataframe(df, desc="", level='debug'):
-    getattr(logger, level)(f"{desc}\n{df}")
+def logger_dataframe(df, desc="", level='debug', precise=2):
+    getattr(logger, level)(f"{desc}\n{df.round(precise)}")
 

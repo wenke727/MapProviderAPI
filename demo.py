@@ -1,4 +1,5 @@
 #%%
+import os
 import glob
 import numpy as np
 import pandas as pd
@@ -28,8 +29,18 @@ UTM_CRS = None
 
 #%%
 
-def _plot_temporal_prob_dist(actual_duration, avg_duration, min_duration):
+def _save_fig(fig, fn):
+    return fig.savefig(fn, bbox_inches='tight', pad_inches=0.1, dpi=500)
+
+def _judge_lable(probs:dict, eps=.6):
+    for key, val in probs.items():
+        if val < eps:
+            return False
+    return True
+
+def _plot_temporal_prob_dist(actual_duration, avg_duration, avg_waiting):
     # 生成一系列的实际通行时间用于绘图
+    min_duration = avg_duration - avg_waiting
     durations = np.linspace(min_duration*0.8, actual_duration * 1.2, 1000)
     probabilities = [cal_temporal_prob(duration, avg_duration, min_duration) for duration in durations]
 
@@ -46,7 +57,7 @@ def _plot_temporal_prob_dist(actual_duration, avg_duration, min_duration):
     plt.grid(True)
     plt.show()
 
-def cal_temporal_prob(actual_duration, avg_duration, min_duration, factor=5, bias=120):
+def cal_temporal_prob(actual_duration, avg_duration, avg_waiting, factor=5, bias=120):
     """
     根据正态分布函数计算概率。
     
@@ -55,10 +66,11 @@ def cal_temporal_prob(actual_duration, avg_duration, min_duration, factor=5, bia
     :param sigma: 标准差
     :return: 给定实际通行时间的可能性
     """
-    if min_duration * .75 > actual_duration:
+    min_duration = avg_duration - avg_waiting
+    if min_duration * .6 > actual_duration:
         return 0
     
-    sigma = avg_duration - min_duration + bias
+    sigma = avg_waiting + bias
     
     return np.exp(-((actual_duration - avg_duration) ** 2) / (factor * sigma ** 2))
 
@@ -79,10 +91,11 @@ def get_time_params(traj, df_path, lineid_2_waitingtime):
     _sum = df_path.duration.sum()
     min_duration = _sum - waiting_time
     avg_duration = _sum + first_watiting_time
+    avg_waiting = waiting_time + first_watiting_time
 
-    temporal_prob = cal_temporal_prob(actual_duration, avg_duration, min_duration)
+    temporal_prob = cal_temporal_prob(actual_duration, avg_duration, avg_waiting)
     
-    return actual_duration, min_duration, avg_duration, temporal_prob
+    return actual_duration, avg_duration, avg_waiting,  temporal_prob
 
 def trim_first_and_last_step(df_path, res, eps=.2):
     # 裁剪首尾段
@@ -244,19 +257,23 @@ def plot_helper(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None,
         
     return fig, ax
 
-def pipeline(pts, traj_id, plot_time_dist=False, dist_eps=200, to_img=None, title=''):
-    # preprocess
+def pipeline(pts, traj_id, plot_time_dist=False, dist_eps=200, plot=True, save_img=None, title=''):
+    global lineid_2_waitingtime
+    
+    res = {}
+    # step 1: preprocess
     traj = Trajectory(pts, traj_id=traj_id, utm_crs=UTM_CRS)
+    res['traj'] = traj
     traj.preprocess(
         radius=600, 
-        speed_limit=0, dis_limit=None, angle_limit=45, alpha=1, strict=False, 
+        speed_limit=0, dis_limit=None, angle_limit=60, alpha=1, strict=False, 
         tolerance=200,
         verbose=False, 
         plot=False
     )
 
-    # map-matching
-    res = matcher.matching(
+    # step 2:map-matching
+    match_res = matcher.matching(
         traj.points.to_crs(4326), 
         search_radius=500, top_k=8,
         dir_trans=False, 
@@ -265,47 +282,122 @@ def pipeline(pts, traj_id, plot_time_dist=False, dist_eps=200, to_img=None, titl
         simplify=False,
         debug_in_levels=False
     )
+    res['match_res'] = match_res
+    logger.debug(match_res)
 
-    if len(res.get('epath', [])) == 0:
-        print("status: ", res['status'])
+    if len(match_res.get('epath', [])) == 0:
+        print("status: ", match_res['status'])
         logger.warning("No candidates/轨迹点无法映射到候选边上")
-        return traj, res, pd.DataFrame()
+        return traj, match_res, pd.DataFrame()
 
-    df_path = traj.align_crs(df_edges.loc[res['epath']])
-
-    # visualize
-    df_path = trim_first_and_last_step(df_path, res, eps=0.2)
+    # step 3: postprocess `df_path`
+    df_path = traj.align_crs(df_edges.loc[match_res['epath']])
+    df_path = trim_first_and_last_step(df_path, match_res, eps=0.1)
+    res['df_path'] = df_path
         
-    # metric, 计算轨迹分数：时间、空间 以及 Cell
+    # step 4: metric, 计算轨迹分数：时间、空间 以及 Cell
     route = merge_linestrings(df_path.geometry)
     dists = traj.distance(route)
     cell_dis_prob = (dists < dist_eps).mean()
-    res['probs'] = {**res['probs'], 'cell_dis_prob': cell_dis_prob} # **dist_dict
+    match_res['probs'] = {**match_res['probs'], 'cell_dis_prob': cell_dis_prob} # **dist_dict
 
-    #! travel time probs
-    actual_duration, min_duration, avg_duration, temporal_prob = get_time_params(traj, df_path, lineid_2_waitingtime)
+    # step 4.2: travel time probs
+    actual_duration, avg_duration, avg_waiting,  temporal_prob = get_time_params(traj, df_path, lineid_2_waitingtime)
     if plot_time_dist:
-        _plot_temporal_prob_dist(actual_duration, avg_duration, min_duration)
+        _plot_temporal_prob_dist(actual_duration, avg_duration, avg_waiting)
 
-    res['probs']['temporal_prob'] = temporal_prob
+    match_res['probs']['temporal_prob'] = temporal_prob
     for p in ['trans_prob', 'prob']:
-        if p in res['probs']:
-            del res['probs'][p]
+        if p in match_res['probs']:
+            del match_res['probs'][p]
+
+    res = {
+        'traj': traj, 
+        'matching': match_res, 
+        'df_path': df_path.drop(columns=['dir', 'distance']),
+    }    
     
-    start = df_path.iloc[0].src_name
-    end = df_path.iloc[-1].dst_name
-    trip_info = f" \n{start} -> {end}\n{actual_duration/60:.1f} min"\
-                f" / [{min_duration/60:.1f}, {avg_duration/60:.1f}, "\
-                f"{(min_duration + (avg_duration - min_duration) * 2) / 60:.1f}]"
-    fig, ax = plot_helper(traj, matcher, res, f"{title}, {trip_info}")
+    if plot:
+        start = df_path.iloc[0].src_name
+        end = df_path.iloc[-1].dst_name
+        trip_info = f" \n{start} -> {end}\n{actual_duration/60:.1f} min"\
+                    f" / [{(avg_duration - avg_waiting)/60:.1f}, {avg_duration/60:.1f}, "\
+                    f"{(avg_duration + avg_waiting) / 60:.1f}]"
+        fig, ax = plot_helper(traj, matcher, match_res, f"{title}, {trip_info}")
+        res['fig'] = fig
+        res['ax'] = ax
+        if save_img:
+            fig.savefig(save_img, bbox_inches='tight', pad_inches=0.1, dpi=500)
+            plt.close()
     
-    if to_img:
-        fig.savefig(to_img, bbox_inches='tight', pad_inches=0.1, dpi=500)
-        plt.close()
+    return res
+
+def exp(folder):
+    folder = Path(folder)
+    logger = make_logger(folder, 'cell', console=True, include_timestamp=False)
+
+    img_folder = folder / 'imgs'
+    img_folder_0 = img_folder / 'Subway'
+    img_folder_1 = img_folder / 'NoSubway'
+    for f in [folder, img_folder_0, img_folder_1]:
+        # if f.exists():
+        #     os.remove(f)
+        f.mkdir(parents=True, exist_ok=True)
+
+    matching_res = []
+    raw_points_res = []
+    points_res = []
+    path_res= []
+
+    for fn in sorted(glob.glob(f"{folder}/csv/*.csv")):
+        fn_name = Path(fn).name.split('.')[0]
+        traj_id = int(fn_name)
+
+        # read
+        logger.info(f"processing: {fn}")
+        pts = read_csv_to_geodataframe(fn)
+
+        try:
+            _res = pipeline(pts, traj_id=traj_id, plot_time_dist=False, title=Path(fn).name)
+            traj = _res['traj']
+            
+            # collect geojson
+            traj.raw_df.loc[:, 'traj_id'] = int(fn_name)
+            raw_points_res.append(traj.raw_df)
+            if not traj.points.empty:
+                points_res.append(traj.points)
+            if not _res['df_path'].empty:
+                _res['df_path'].loc[:, 'traj_id'] = int(fn_name)
+                path_res.append(_res['df_path'])
+
+            # save img for debug
+            lable = _judge_lable(_res['matching']['probs'])
+            if lable:
+                _save_fig(_res['fig'], img_folder_0 / f'{fn_name}.jpg')
+            else:
+                _save_fig(_res['fig'], img_folder_1 / f'{fn_name}.jpg')
+            plt.close()
+            
+            # collect probs
+            _res['matching']['probs'] = {"fn": fn, **_res['matching']['probs']}
+            matching_res.append(_res['matching']['probs'])
+            
+        except:
+            logger.error(fn)
+
+    probs = pd.DataFrame(matching_res)
+    probs.rename(columns={'prob': 'status'}, inplace=True)
+    probs.loc[:, 'status'] = ''
+    probs.to_excel(folder / 'probs.xlsx', index=False)
+
+    to_geojson(gpd.GeoDataFrame(pd.concat(raw_points_res), geometry='geometry'), folder / 'raw_points')
+    to_geojson(gpd.GeoDataFrame(pd.concat(points_res), geometry='geometry'), folder / 'points')
+
+    df_routes = gpd.GeoDataFrame(pd.concat(path_res), geometry='geometry')
+    df_routes.loc[:, 'eid'] = df_routes['eid'].astype(str)
+    to_geojson(df_routes, folder / 'routes')
     
-    logger.debug(res)
-    
-    return traj, res, df_path.drop(columns=['dir', 'distance'])
+    return
 
 
 if __name__ == '__main__':
@@ -316,77 +408,23 @@ if __name__ == '__main__':
                                    .set_index('way_id').to_dict()['duration']
 
 
+    exp('./exp/12-06/0800')
+
 
 #%%
 
 folder = Path('./exp/12-06/0800/csv')
-# folder = Path('./exp/12-08/0800/csv')
-out_foler = folder / '../'
-logger = make_logger(out_foler, 'cell', console=True, include_timestamp=False)
-
-img_fodler = out_foler / 'imgs'
-out_foler.mkdir(parents=True, exist_ok=True)
-img_fodler.mkdir(parents=True, exist_ok=True)
+folder = Path('./exp/12-08/0800/csv')
 
 fns = sorted(glob.glob(f"{folder}/*.csv"))
 
-# traj_id = 2
+# traj_id = 0
 # fn = fns[traj_id]
 # pts = read_csv_to_geodataframe(fn)
-# traj, res, route = pipeline(pts, traj_id=traj_id, plot_time_dist=False, title=Path(fn).name, to_img=False)
+# res = pipeline(pts, traj_id=traj_id, plot_time_dist=False, title=Path(fn).name, save_img=False)
+# traj = res['traj']
+# df_path = res['df_path']
 
-
-#%%
-
-matching_res = []
-raw_points_res = []
-points_res = []
-path_res= []
-
-for fn in fns:
-    try:
-        fn_name = Path(fn).name.split('.')[0]
-        to_img = img_fodler / f'{fn_name}.jpg'
-        traj_id = int(fn_name)
-
-        # read
-        logger.info(f"processing: {fn}")
-        pts = read_csv_to_geodataframe(fn)
-
-        traj, res, route = pipeline(pts, traj_id=traj_id, plot_time_dist=False, title=Path(fn).name, to_img=to_img)
-        
-        # collect geojson
-        traj.raw_df.loc[:, 'traj_id'] = int(fn_name)
-        raw_points_res.append(traj.raw_df)
-        if not traj.points.empty:
-            points_res.append(traj.points)
-        if not route.empty:
-            route.loc[:, 'traj_id'] = int(fn_name)
-            path_res.append(route)
-
-        # collect probs
-        res['probs'] = {"fn": fn, **res['probs']}
-        matching_res.append(res['probs'])
-    except:
-        logger.error(fn)
-
-probs = pd.DataFrame(matching_res)
-probs.rename(columns={'prob': 'status'}, inplace=True)
-probs.loc[:, 'status'] = ''
-probs.to_excel(out_foler / 'probs.xlsx', index=False)
-
-to_geojson(gpd.GeoDataFrame(pd.concat(raw_points_res), geometry='geometry'), out_foler / 'raw_points')
-to_geojson(gpd.GeoDataFrame(pd.concat(points_res), geometry='geometry'), out_foler / 'points')
-
-df_routes = gpd.GeoDataFrame(pd.concat(path_res), geometry='geometry')
-df_routes.loc[:, 'eid'] = df_routes['eid'].astype(str)
-to_geojson(df_routes, out_foler / 'routes')
-
-#%%
-
-# df_path = df_edges.loc[res['epath']]
-# df_combined_path = process_path_data(df_path)
-# df_combined_path
 
 
 # %%
