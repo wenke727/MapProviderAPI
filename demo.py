@@ -97,15 +97,25 @@ def get_time_params(traj, df_path, lineid_2_waitingtime):
     
     return actual_duration, avg_duration, avg_waiting,  temporal_prob
 
-def trim_first_and_last_step(df_path, res, eps=.2):
+def trim_first_and_last_step(df_path, res, eps=.5):
     # 裁剪首尾段
     df_path = df_edges.loc[res['epath']]
     if res['status'] != 0:
         return df_path
     
-    start = 0 if res['step_0'] < eps else 1
+    if res['step_0'] < eps:
+        start = 0  
+    else:
+        start = 1
+        logger.debug(f"Change start to {start}, for {res['step_0']:.3f} < {eps}")
+
     _len  = len(res['epath']) 
-    end = _len - 2 if res['step_n'] < eps else _len - 1
+    
+    if res['step_n'] < eps:
+        end = _len - 2  
+        logger.debug(f"Change end to {end}, for {res['step_n']:.3f} < {eps}")
+    else:
+        end = _len - 1
 
     if df_path.iloc[start].dst_name in ['exchange',  'inner_link']:
         start += 1
@@ -157,6 +167,9 @@ def merge_linestrings(linestrings, to_multilinestring=False):
     return merged
 
 def process_path_data(df):
+    if df.empty:
+        return df
+    
     df = df.copy()
     special_cases_mask = df['dst_name'].isin(['exchange', 'inner_link'])
     
@@ -243,8 +256,12 @@ def plot_helper(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None,
     xmin, xmax, ymin, ymax = ax.axis()
     delta_y = (ymax - ymin) / 50
     for i, p in od.iterrows():
+        x = p.geometry.x
+        y = p.geometry.y + delta_y
+        if xmin > x or x > xmax or ymin > y or y > ymax:
+            continue
         ax.text(
-            p.geometry.x, p.geometry.y + delta_y, p['name'], transform=ax.transData,
+            x, y, p['name'], transform=ax.transData,
             bbox=dict(facecolor='white', alpha=0.4, edgecolor='none', boxstyle="round,pad=0.5"),
             va='bottom', 
             ha='center',
@@ -275,7 +292,7 @@ def pipeline(pts, traj_id, plot_time_dist=False, dist_eps=200, plot=True, save_i
     # step 2:map-matching
     match_res = matcher.matching(
         traj.points.to_crs(4326), 
-        search_radius=500, top_k=8,
+        search_radius=600, top_k=8,
         dir_trans=False, 
         details=False, 
         plot=False, 
@@ -292,7 +309,7 @@ def pipeline(pts, traj_id, plot_time_dist=False, dist_eps=200, plot=True, save_i
 
     # step 3: postprocess `df_path`
     df_path = traj.align_crs(df_edges.loc[match_res['epath']])
-    df_path = trim_first_and_last_step(df_path, match_res, eps=0.1)
+    df_path = trim_first_and_last_step(df_path, match_res)
     res['df_path'] = df_path
         
     # step 4: metric, 计算轨迹分数：时间、空间 以及 Cell
@@ -332,16 +349,15 @@ def pipeline(pts, traj_id, plot_time_dist=False, dist_eps=200, plot=True, save_i
     
     return res
 
-def exp(folder):
-    folder = Path(folder)
+def exp(folder, desc=None):
+    logger.remove()
     logger = make_logger(folder, 'cell', console=True, include_timestamp=False)
 
-    img_folder = folder / 'imgs'
+    folder = Path(folder)
+    img_folder = folder  / desc if desc else folder
     img_folder_0 = img_folder / 'Subway'
     img_folder_1 = img_folder / 'NoSubway'
-    for f in [folder, img_folder_0, img_folder_1]:
-        # if f.exists():
-        #     os.remove(f)
+    for f in [folder, img_folder, img_folder_0, img_folder_1]:
         f.mkdir(parents=True, exist_ok=True)
 
     matching_res = []
@@ -385,6 +401,9 @@ def exp(folder):
         except:
             logger.error(fn)
 
+    # save result
+    if desc:
+        folder = folder / desc
     probs = pd.DataFrame(matching_res)
     probs.rename(columns={'prob': 'status'}, inplace=True)
     probs.loc[:, 'status'] = ''
@@ -407,9 +426,7 @@ if __name__ == '__main__':
                                    .drop_duplicates()\
                                    .set_index('way_id').to_dict()['duration']
 
-
-    exp('./exp/12-06/0800')
-
+    # exp('./exp/12-08/0800')
 
 #%%
 
@@ -418,13 +435,12 @@ folder = Path('./exp/12-08/0800/csv')
 
 fns = sorted(glob.glob(f"{folder}/*.csv"))
 
-# traj_id = 0
-# fn = fns[traj_id]
-# pts = read_csv_to_geodataframe(fn)
-# res = pipeline(pts, traj_id=traj_id, plot_time_dist=False, title=Path(fn).name, save_img=False)
-# traj = res['traj']
-# df_path = res['df_path']
-
+traj_id = 1
+fn = fns[traj_id]
+pts = read_csv_to_geodataframe(fn)
+res = pipeline(pts, traj_id=traj_id, plot_time_dist=False, title=Path(fn).name, save_img=False)
+traj = res['traj']
+df_path = res['df_path']
 
 
 # %%
