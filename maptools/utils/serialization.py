@@ -3,6 +3,7 @@ import hashlib
 import pickle
 import os
 import geopandas as gpd
+import matplotlib.pyplot as plt
 
 
 def to_geojson(gdf:gpd.GeoDataFrame, filename:str):
@@ -42,3 +43,38 @@ def save_checkpoint(obj, ckpt_file_name, ignore_att=[]):
         return True
     except:
         return False
+    
+def save_fig(fig, fn, bbox_inches='tight', dpi=500, pad_inches=0.1, *args, **kwargs):
+    """
+    Save a matplotlib figure to a file.
+
+    Parameters:
+    fig : matplotlib.figure.Figure
+        The figure object to be saved.
+    fn : str
+        The filename or path to save the figure to.
+    bbox_inches : str or `~matplotlib.transforms.Bbox`, optional
+        The bounding box in inches. Only the given portion of the figure is saved. 
+        If 'tight', try to figure out the tight bbox of the figure.
+    dpi : int, optional
+        The resolution of the figure in dots-per-inch.
+    pad_inches : float, optional
+        Amount of padding around the figure when bbox_inches is 'tight'.
+
+    Other Parameters:
+    *args, **kwargs : 
+        Additional arguments and keyword arguments to be passed to `fig.savefig()`.
+
+    Returns:
+    None
+
+    Example:
+    >>> fig = plt.figure()
+    >>> save_fig(fig, 'my_plot.png')
+    """
+    
+    return fig.savefig(
+        fn, bbox_inches=bbox_inches, 
+        pad_inches=pad_inches, dpi=dpi, *args, **kwargs
+    )
+    

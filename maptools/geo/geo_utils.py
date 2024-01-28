@@ -22,7 +22,6 @@ def azimuth(point1, point2):
 
     return azimuth
 
-
 def point_gdf_to_linestring(df, geom_col_name):
     """
     Convert GeoDataFrame of Points to shapely LineString
