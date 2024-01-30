@@ -185,12 +185,19 @@ def filter_by_point_update_policy(gdf:GeoDataFrame, radius:float, keep_last=True
             continue
 
         distance = row.geometry.distance(gdf.at[last_update_index, 'geometry'])
-        if distance > radius:
-            # Record index if distance exceeds the threshold
-            last_update_index = idx
-            update_indices.append(idx)
-    if keep_last and update_indices[-1] != idx:
+        if distance < radius:
+            continue
+        
+        # Record index if distance exceeds the threshold
+        last_update_index = idx
         update_indices.append(idx)
+    
+    # the last point
+    if keep_last and update_indices[-1] != idx:
+        p_0 = gdf.iloc[update_indices[-1]].geometry
+        p_1 = gdf.iloc[-1].geometry
+        if not p_0.equals(p_1):
+            update_indices.append(idx)
         
     return gdf.loc[update_indices]
 
@@ -218,6 +225,9 @@ def simplify_traj_points(gdf, tolerance, precision=6):
         A simplified GeoDataFrame containing only the points that are within
         'precision' decimal places of the points on the simplified trajectory.
     """
+    if gdf.shape[0] <= 2:
+        return gdf
+    
     gdf.sort_values(by='dt', inplace=True)
     simplified_line = LineString(gdf['geometry'].values).simplify(tolerance)
     simplified_points = [tuple(np.round(p, precision)) for p in simplified_line.coords]
@@ -225,7 +235,7 @@ def simplify_traj_points(gdf, tolerance, precision=6):
     def is_near_simplified_line(point):
         point_rounded = tuple(np.round(point.coords[0], precision))
         return point_rounded in simplified_points
-
+    # FIXME 存在重叠点的问题
     mask = gdf['geometry'].apply(is_near_simplified_line)
 
     return gdf[mask]

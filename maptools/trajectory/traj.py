@@ -40,6 +40,20 @@ class Trajectory(BaseTrajectory):
         if traj_id_col not in self.points.columns:
             self.points.loc[:, traj_id_col] = traj_id
 
+    def __str__(self):
+        try:
+            line = self.to_linestring()
+        except RuntimeError:
+            return "Invalid trajectory!"
+        return (
+            f"Trajectory {self.id} ({self.get_start_time()} to {self.get_end_time()}) "
+            f"| Size: {self.size()} | Length: {round(self.get_length(), 1)}m\n"
+            f"Bounds: {self.get_bbox()}\n{line.wkt[:100]}"
+        )
+
+    def is_valid(self):
+        return self.points.shape[0] > 1
+
     def clean_drift_points(self, method='twoside', speed_limit=None, dis_limit=None,
                            angle_limit=30, alpha=1, strict=False, verbose=False):
         """

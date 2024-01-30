@@ -34,7 +34,7 @@ class BaseTrajectory:
         raise NotImplementedError
 
     def size(self):
-        raise NotImplementedError
+        raise len(self.points.index)
 
     def copy(self):
         raise NotImplementedError
@@ -263,6 +263,9 @@ class BaseTrajectory:
             points = self.points
             
         line_gdf = self._to_line_df(points, columns)
+        if line_gdf.empty:
+            return line_gdf
+        
         line_gdf.drop(columns=[self.get_geom_col(), "prev_pt"], inplace=True)
         line_gdf.reset_index(drop=True, inplace=True)
         line_gdf.rename(columns={"line": "geometry"}, inplace=True)
