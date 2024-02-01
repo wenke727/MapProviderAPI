@@ -11,6 +11,8 @@ from loguru import logger
 import matplotlib.pyplot as plt
 from shapely import LineString, MultiLineString
 
+from sklearn.metrics import classification_report
+
 from tilemap import plot_geodata
 from maptools.trajectory import Trajectory
 from maptools.geo.serialization import read_csv_to_geodataframe
@@ -25,16 +27,22 @@ from maptools.utils.serialization import save_fig
 from maptools.geo.linestring import merge_linestrings
 
 set_chinese_font_style()
-UTM_CRS = None
+
 
 
 #%%
-UPDATE_RADIUS = 500
+UTM_CRS = None
+UPDATE_RADIUS = 800
+SIMPLIFY_TOLERANCE = 100
+ANGLE_LIMIT = None
+DRIFT_ALPHA = 1
+
 SEARCH_RADIUS = 300
-DRIFT_ALPHA = 1.5
-SIMPLIFY_TOLERANCE = 300
 TOK_K_CANDIDATES = 8
+TRIM_EDGE_RATIO = 0.15
+
 CELL_SERVICE_RADIUS = 200
+
 
 def _test_shortest_path(net, src, dst):
     """ 最短路径测试 """
@@ -164,7 +172,7 @@ def get_time_params(traj:Trajectory, df_path:gpd.GeoDataFrame, lineid_2_waitingt
     
     return actual_duration, avg_duration, avg_waiting, temporal_prob
 
-def trim_first_and_last_step(df_path, res, eps=.5):
+def trim_first_and_last_step(df_path, res, eps=TRIM_EDGE_RATIO, skip_exchange_link=False):
     """
     Trims the first and last steps of a path based on specified criteria.
 
@@ -193,38 +201,41 @@ def trim_first_and_last_step(df_path, res, eps=.5):
     - The function updates `res` with the new 'epath', 'step_0', and 'step_n' based on the trimming.
     - It also processes the trimmed path data using `process_path_data` before returning.
     """
-    
     df_path = df_edges.loc[res['epath']]
     if res['status'] != 0:
         return df_path
-    
-    # determine_trim_indices
-    path_length  = len(res['epath']) 
-    if res['step_0'] < eps:
-        start = 0  
-    else:
-        start = 1
-        logger.debug(f"Change start to {start}, for {res['step_0']:.3f} < {eps}")
-    if res['step_n'] < eps:
-        end = path_length - 2  
-        logger.debug(f"Change end to {end}, for {res['step_n']:.3f} < {eps}")
-    else:
-        end = path_length - 1
 
-    if df_path.iloc[start].dst_name in ['exchange',  'inner_link']:
+    logger.debug(f"step_0: {res['step_0']:.3f}, step_n: {res['step_n']:.3f}")
+    # determine_trim_indices
+    start, end = 0, len(res['epath'])  - 1
+    if res['step_0'] < eps:
+        logger.debug(f"Change `step_0` to 0, for {res['step_0']:.3f} < {eps:.3f}")
+        res['step_0'] = 0
+    elif res['step_0'] > 1 - eps:
+        logger.debug(f"Change `step_0` to 0, start += 1, for {res['step_0']:.3f} < {1 - eps:.3f}")
+        res['step_0'] = 0
         start += 1
-    if df_path.iloc[end].dst_name in ['exchange',  'inner_link']:
+        
+    if res['step_n'] < eps:
+        logger.debug(f"Change `step_n` to 1, end -= 1, for {res['step_n']:.3f} < {eps:.3f}")
+        res['step_n'] = 1
         end -= 1
-    
+    elif res['step_n'] > 1 - eps:
+        logger.debug(f"Change `step_n` to 1, for {res['step_n']:.3f} > {1 - eps:.3f}")
+        res['step_n'] = 1
+
+    if skip_exchange_link:
+        if df_path.iloc[start].dst_name in ['exchange',  'inner_link']:
+            start += 1
+        if df_path.iloc[end].dst_name in ['exchange',  'inner_link']:
+            end -= 1
+        
     # update `res`
     res['epath'] = res['epath'][start: end + 1]
-    if start != 0:
-        res['step_0'] = 0
-    if end != path_length - 1:
-        res['step_n'] = 1
-    
-    # update `path`
     df_path = df_path.iloc[start: end + 1]
+    if df_path.shape[0] > 1:
+        df_path.iloc[0].duration *= res['step_0']
+        df_path.iloc[-1].duration *= res['step_n']
     df_combined_path = process_path_data(df_path)
     
     return df_combined_path
@@ -263,24 +274,9 @@ def process_path_data(df):
     df.loc[:, 'order'] = range(df.shape[0])
     df['step'] = (df['way_id'] != df['way_id'].shift()).cumsum() - 1
     
-    # step_id = 0
-    # _len = len(df)
-    # arr_steps = np.zeros(_len)
-    # prev_way_id = df.iloc[0].way_id
-    # for i, (_, item) in enumerate(df.iloc[1:].iterrows(), start=1):
-    #     if item['way_id'] == prev_way_id and not special_cases_mask.iloc[i]:
-    #         arr_steps[i] = step_id
-    #         continue
-    #     step_id += 1
-    #     arr_steps[i] = step_id
-    #     prev_way_id = item['way_id']
-    # df.loc[:, 'step'] = arr_steps
-
-
     # Separate records where dst_name is 'exchange' or 'inner_link'
     special_cases = df[special_cases_mask]
     regular_cases = df[~special_cases_mask]
-
 
     # Group by eid and aggregate
     grouped = regular_cases.groupby(['way_id', 'step']).agg({
@@ -382,7 +378,7 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
     res['traj'] = traj
     traj.preprocess(
         radius=UPDATE_RADIUS, 
-        speed_limit=0, dis_limit=None, angle_limit=60, alpha=DRIFT_ALPHA, strict=False, 
+        speed_limit=0, dis_limit=None, angle_limit=ANGLE_LIMIT, alpha=DRIFT_ALPHA, strict=False, 
         tolerance=SIMPLIFY_TOLERANCE,
         verbose=False, 
         plot=False
@@ -412,7 +408,7 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
 
     # step 3: postprocess `df_path`
     df_path = traj.align_crs(df_edges.loc[match_res['epath']])
-    # df_path = trim_first_and_last_step(df_path, match_res)
+    df_path = trim_first_and_last_step(df_path, match_res)
     res['df_path'] = df_path.drop(columns=['dir', 'distance'])    
         
     # step 4: metric, 计算轨迹分数：时间、空间 以及 Cell
@@ -428,7 +424,6 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
         'avg_duration': avg_duration, 
         'avg_waiting': avg_waiting
     }
-
     match_res['probs']['temporal_prob'] = temporal_prob
     for p in ['trans_prob', 'prob']:
         if p in match_res['probs']:
@@ -447,7 +442,7 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
     
     return res
 
-def exp(folder, out_folder=None, save_imgs=True):
+def exp(folder, out_folder=None, save_imgs=True, debug=False):
     global logger
     logger = make_logger(out_folder, 'log', console=True, include_timestamp=False)
     folder = Path(folder)
@@ -475,8 +470,13 @@ def exp(folder, out_folder=None, save_imgs=True):
         label = _judge_not_subway(result['match_res'].get('probs', {'prob': 0}))
         result['label'] = label
         info = {"fn": fn, "label": label, **result['match_res']['probs']}
+        if 'step_0' in result['match_res']:
+            info['step_0'] = result['match_res']['step_0']
+        if 'step_n' in result['match_res']:
+            info['step_n'] = result['match_res']['step_n']
         if 'temporal' in result:
             info.update(result['temporal'])
+        logger.debug(info)
         matching_lst.append(info)
 
     def _save_fig(result):
@@ -510,19 +510,24 @@ def exp(folder, out_folder=None, save_imgs=True):
     points_lst = []
     matching_lst = []
     raw_points_lst = []
-    for fn in sorted(glob.glob(f"{folder}/*.csv")):
+    fns = sorted(glob.glob(f"{folder}/*.csv"))
+    if fns: fns = fns[:5]
+    for fn in fns:
         fn_name = Path(fn).name.split('.')[0]
         traj_id = int(fn_name)
+        # if traj_id != 185:
+        #     continue
+        
         logger.info(f"processing: {fn}")
         pts = read_csv_to_geodataframe(fn)
 
         # pipeline
-        try:
-            result = pipeline(pts, traj_id=traj_id, plot=save_imgs, title=Path(fn).name)
-            if 'match_res' not in result:
-                result['match_res'] = {'probs': {'norm_prob': 0}}
-        except:
-            logger.error(f"process {fn} failed")
+        # try:
+        result = pipeline(pts, traj_id=traj_id, plot=save_imgs, title=Path(fn).name)
+        if 'match_res' not in result:
+            result['match_res'] = {'probs': {'norm_prob': 0}}
+        # except:
+            # logger.error(f"process {fn} failed")
 
         traj = result['traj']
         traj.raw_df.loc[:, 'traj_id'] = traj_id
@@ -542,21 +547,26 @@ if __name__ == '__main__':
                                    .drop_duplicates()\
                                    .set_index('way_id').to_dict()['duration']
 
-    exp('./exp/12-08/0800/csv', './exp/12-08/0800/attempt_1', save_imgs=False)
+    # exp('./exp/12-08/0800/csv', './exp/12-08/0800/attempt_3', save_imgs=True)
 
-    #%%
     # folder = Path('./exp/12-06/0800/csv')
     folder = Path('./exp/12-08/0800/csv')
     fns = sorted(glob.glob(f"{folder}/*.csv"))
-
-    # TODO 存在重叠点
-    traj_id = -1
-    fn = fns[traj_id]
+    num_2_fn = {int(fn.split('/')[-1].split('.')[0]):fn for fn in fns}
+    
+    
+    traj_id = 53
+    
+    fn = num_2_fn[traj_id]
+    # fn = fns[traj_id]
     pts = read_csv_to_geodataframe(fn)
-    traj_res = pipeline(pts, traj_id=traj_id, plot_time_dist=False, title=Path(fn).name, save_img=False)
+    traj_res = pipeline(pts, traj_id=traj_id, title=Path(fn).name, save_img=False, plot=True)
 
     traj = traj_res['traj']
     df_path = traj_res['df_path']
+    logger_dataframe(df_path)
     res = traj_res['match_res']
+
+
 
 # %%

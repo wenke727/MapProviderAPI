@@ -148,7 +148,7 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
 
     # angle limit
     angle_mask = False
-    if angle_limit:
+    if angle_limit is not None:
         df['angle'] = calculate_angle_between_sides(df['dis_pre'], df['dis_next'], df['dis_prenext'])
         angle_mask = df['angle'] < angle_limit
     mask = (traj_mask & (speed_mask | dis_mask | angle_mask))
