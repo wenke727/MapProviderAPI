@@ -5,20 +5,20 @@ import shapely
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+from loguru import logger
 from geopandas import GeoDataFrame
 import matplotlib.pyplot as plt
+
+from tilemap import plot_geodata
 
 from .base import BaseTrajectory
 from .cleaner import simplify_traj_points
 from .cleaner import clean_drift_traj_points
 from .cleaner import filter_by_point_update_policy
-from ..geo.serialization import read_csv_to_geodataframe
+from ..geo.serialization import read_csv_to_geodataframe, to_geojson
 from ..geo.geo_utils import convert_geom_to_utm_crs, convert_geom_to_wgs
+from ..utils.logger import logger_dataframe, make_logger
 
-# from utils.logger import logger_dataframe, make_logger
-
-from tilemap import plot_geodata
-from loguru import logger
 
 TRAJ_ID_COL = "tid"
 
@@ -41,14 +41,9 @@ class Trajectory(BaseTrajectory):
             self.points.loc[:, traj_id_col] = traj_id
 
     def __str__(self):
-        try:
-            line = self.to_linestring()
-        except RuntimeError:
-            return "Invalid trajectory!"
         return (
             f"Trajectory {self.id} ({self.get_start_time()} to {self.get_end_time()}) "
             f"| Size: {self.size()} | Length: {round(self.get_length(), 1)}m\n"
-            f"Bounds: {self.get_bbox()}\n{line.wkt[:100]}"
         )
 
     def is_valid(self):
@@ -68,6 +63,7 @@ class Trajectory(BaseTrajectory):
             self.points, col=[self.traj_id_col, 'dt', 'geometry'],
             method=method, speed_limit=speed_limit, dis_limit=dis_limit,
             angle_limit=angle_limit, alpha=alpha, strict=strict)
+        logger_dataframe(mask, desc="clean_drift_traj_points mask:")
         
         if verbose:
             cur_size = len(self.points)
@@ -106,7 +102,7 @@ class Trajectory(BaseTrajectory):
         return self.points
 
     def preprocess(self, radius=500, 
-                   speed_limit=0, dis_limit=0, angle_limit=45, alpha=1, strict=False, 
+                   speed_limit=0, dis_limit=0, angle_limit=45, alpha=3, strict=False, 
                    tolerance=None, 
                    verbose=True, plot=True
                    ):
@@ -130,7 +126,7 @@ class Trajectory(BaseTrajectory):
         
     @property
     def crs(self):
-        return self.points.crs
+        return f"EPSG:{self.points.crs.to_epsg()}"
 
     @property
     def get_epsg(self):
@@ -174,6 +170,10 @@ class Trajectory(BaseTrajectory):
         
         return gdf.to_crs(self.crs)
         
+    def to_file(self, fn, raw=False):
+        df = self.points if not raw else self.raw_df
+        
+        return to_geojson(df, fn)
 
 if __name__ == "__main__":
     idx = 0

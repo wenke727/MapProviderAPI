@@ -1,6 +1,7 @@
 tmp/
 exp/
 data/
+debug/
 joblib_cache/
 cache/
 .DS_Store

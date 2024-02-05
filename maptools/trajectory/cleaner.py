@@ -30,7 +30,7 @@ def calculate_angle_between_sides(adjacent_side1, adjacent_side2, opposite_side)
 
     return angles
 
-def get_outliers_thred_by_iqr(series, alpha=2):
+def get_outliers_thred_by_iqr(series, alpha=3):
     """
     Calculate and return the lower and upper threshold values for outlier detection
     in a given series, using the Interquartile Range (IQR) method.
@@ -149,8 +149,9 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
     # angle limit
     angle_mask = False
     if angle_limit is not None:
-        df['angle'] = calculate_angle_between_sides(df['dis_pre'], df['dis_next'], df['dis_prenext'])
-        angle_mask = df['angle'] < angle_limit
+        df['angle'] = 180 - calculate_angle_between_sides(df['dis_pre'], df['dis_next'], df['dis_prenext'])
+        angle_mask = (df['angle'] > angle_limit).fillna(False)
+        # logger.debug(f"\nAngels: {list(np.round(df['angle'].values, 0))}, \nmask: {list(angle_mask)}")
     mask = (traj_mask & (speed_mask | dis_mask | angle_mask))
     
     return data[~mask], df

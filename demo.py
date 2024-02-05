@@ -29,17 +29,20 @@ from maptools.geo.linestring import merge_linestrings
 set_chinese_font_style()
 
 
-
 #%%
 UTM_CRS = None
 UPDATE_RADIUS = 800
-SIMPLIFY_TOLERANCE = 100
-ANGLE_LIMIT = None
-DRIFT_ALPHA = 1
+SIMPLIFY_TOLERANCE = 200
+ANGLE_LIMIT = 45
+SPEED_LIMIT = None
+DISTANCE_LIMIT = 0
+DRIFT_ALPHA = 3
 
-SEARCH_RADIUS = 300
-TOK_K_CANDIDATES = 8
+SEARCH_RADIUS = 500
+TOK_K_CANDIDATES = 10
 TRIM_EDGE_RATIO = 0.15
+BEBUG_BY_LEVEL = False
+MATCH_DETAIL = False
 
 CELL_SERVICE_RADIUS = 200
 
@@ -378,7 +381,7 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
     res['traj'] = traj
     traj.preprocess(
         radius=UPDATE_RADIUS, 
-        speed_limit=0, dis_limit=None, angle_limit=ANGLE_LIMIT, alpha=DRIFT_ALPHA, strict=False, 
+        speed_limit=SPEED_LIMIT, dis_limit=DISTANCE_LIMIT, angle_limit=ANGLE_LIMIT, alpha=DRIFT_ALPHA, strict=False, 
         tolerance=SIMPLIFY_TOLERANCE,
         verbose=False, 
         plot=False
@@ -392,8 +395,8 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
         simplify = False,
         tolerance=SIMPLIFY_TOLERANCE,
         plot = False, 
-        details = False, 
-        debug_in_levels = False
+        details = MATCH_DETAIL, 
+        debug_in_levels = BEBUG_BY_LEVEL
     )
     res['match_res'] = match_res
     logger.debug(match_res)
@@ -432,7 +435,12 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
     if plot:
         start = df_path.iloc[0].src_name
         end = df_path.iloc[-1].dst_name
-        trip_info = f" \n{start} -> {end}\n{actual_duration/60:.1f} min"\
+        try:
+            ratio = f" / {match_res.get('step_0', 0):.2f}, {match_res.get('step_n', 0):.2f}"
+        except:
+            ratio = ''
+        trip_info = f" \n{start} -> {end}{ratio}\n"\
+                    f"{actual_duration/60:.1f} min"\
                     f" / [{(avg_duration - avg_waiting)/60:.1f}, {avg_duration/60:.1f}, "\
                     f"{(avg_duration + avg_waiting) / 60:.1f}]"
         res['fig'], res['ax'] = plot_helper(traj, matcher, match_res, f"{title}, {trip_info}")
@@ -511,7 +519,7 @@ def exp(folder, out_folder=None, save_imgs=True, debug=False):
     matching_lst = []
     raw_points_lst = []
     fns = sorted(glob.glob(f"{folder}/*.csv"))
-    if fns: fns = fns[:5]
+    if debug: fns = fns[:5]
     for fn in fns:
         fn_name = Path(fn).name.split('.')[0]
         traj_id = int(fn_name)
@@ -547,26 +555,29 @@ if __name__ == '__main__':
                                    .drop_duplicates()\
                                    .set_index('way_id').to_dict()['duration']
 
-    # exp('./exp/12-08/0800/csv', './exp/12-08/0800/attempt_3', save_imgs=True)
+    exp('./exp/12-08/0800/csv', './exp/12-08/0800/attempt_0202', save_imgs=True, debug=False)
 
-    # folder = Path('./exp/12-06/0800/csv')
-    folder = Path('./exp/12-08/0800/csv')
-    fns = sorted(glob.glob(f"{folder}/*.csv"))
-    num_2_fn = {int(fn.split('/')[-1].split('.')[0]):fn for fn in fns}
-    
-    
-    traj_id = 53
-    
-    fn = num_2_fn[traj_id]
-    # fn = fns[traj_id]
-    pts = read_csv_to_geodataframe(fn)
-    traj_res = pipeline(pts, traj_id=traj_id, title=Path(fn).name, save_img=False, plot=True)
+    # # folder = Path('./exp/12-06/0800/csv')
+    # folder = Path('./exp/12-08/0800/csv')
+    # fns = sorted(glob.glob(f"{folder}/*.csv"))
+    # num_2_fn = {int(fn.split('/')[-1].split('.')[0]):fn for fn in fns}
+    # traj_id = 174
+    # fn = num_2_fn[traj_id]
+    # # fn = fns[traj_id]
 
-    traj = traj_res['traj']
-    df_path = traj_res['df_path']
-    logger_dataframe(df_path)
-    res = traj_res['match_res']
+    # fn = Path('./exp/badCase/29980.csv')
+    # fn = Path('./exp/badCase/305627.csv')
+    # fn = Path('./exp/badCase/301279.csv')
+    # fn = Path('./exp/badCase/268828.csv') # load failed!
+    # traj_id = int(fn.name.split('.')[0])
+    # pts = read_csv_to_geodataframe(fn)
+    # traj_res = pipeline(pts, traj_id=traj_id, title=Path(fn).name, save_img=False, plot=True)
 
+    # traj = traj_res['traj']
+    # df_path = traj_res['df_path']
+    # if not df_path.empty:
+    #     logger_dataframe(df_path.drop(columns=['geometry']))
+    # res = traj_res['match_res']
 
 
 # %%
