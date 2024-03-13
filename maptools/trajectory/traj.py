@@ -63,9 +63,9 @@ class Trajectory(BaseTrajectory):
             self.points, col=[self.traj_id_col, 'dt', 'geometry'],
             method=method, speed_limit=speed_limit, dis_limit=dis_limit,
             angle_limit=angle_limit, alpha=alpha, strict=strict)
-        logger_dataframe(mask, desc="clean_drift_traj_points mask:")
         
         if verbose:
+            # logger_dataframe(mask, desc="clean_drift_traj_points mask:")
             cur_size = len(self.points)
             logger.debug(f"Clean drift points {ori_size} -> {cur_size}, cut down {(ori_size - cur_size) / ori_size * 100:.1f}%")
         

@@ -252,6 +252,7 @@ def get_subway_routes(src:pd.Series, dst:pd.Series, strategy:int=2,
     
     routes.loc[:, 'memo'] = desc
     walkings = extract_walking_steps_from_routes(steps, keep_od_details)
+    # FIXME stop_check
     routes = routes.assign(stop_check=filter_route_by_lineID(steps, src, dst))
     steps.set_index('route', inplace=True)
     

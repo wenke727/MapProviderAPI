@@ -2,7 +2,7 @@ import requests
 import pandas as pd
 from loguru import logger
 
-from geo.coords_utils import convert_to_geom
+from ..geo.coords_utils import convert_to_geom
 
 
 def search_API(keywords: str, types: str = None, citycode: str = None,

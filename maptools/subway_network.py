@@ -140,14 +140,16 @@ def get_subway_segment_info(stations, strategy=0, citycode=CITYCODE, sleep_dt=.2
         logger.error("Invalid stations data")
         return pd.DataFrame()
 
+    logger.info(f"stations: {stations['name'].values.tolist()}")
     routes_lst = []
     steps_lst = []
     walking_lst = []
     unavailabel_stops = []
-    def __helper(src, dst):
+    def _query_helper(src, dst):
         routes, steps, walking_steps = get_subway_routes(src, dst, strategy, citycode, memo=DIRECTION_MEMO)
         routes.query("stop_check == True", inplace=True)
-        if sleep_dt: time.sleep(sleep_dt)
+        if sleep_dt: 
+            time.sleep(sleep_dt)
         
         if routes.empty:
             logger.warning(f"unavailabel stop: {dst['name']}")
@@ -163,9 +165,11 @@ def get_subway_segment_info(stations, strategy=0, citycode=CITYCODE, sleep_dt=.2
     # segs: 1 - n
     src = stations.iloc[0]
     for i in range(1, len(stations)):
-        __helper(src, stations.iloc[i])
+        # BUG 环线
+        _query_helper(src, stations.iloc[i])
+    
     # segs: 0
-    __helper(stations.iloc[1], stations.iloc[-1])
+    _query_helper(stations.iloc[1], stations.iloc[-1])
     if auto_save:
         save_checkpoint(DIRECTION_MEMO, DIRECTION_MEMO_FN)
 
@@ -182,7 +186,6 @@ def get_subway_segment_info(stations, strategy=0, citycode=CITYCODE, sleep_dt=.2
     
     df_routes = pd.concat(routes_lst)
     df_steps = pd.concat(steps_lst)
-    logger.debug(f"stations: {stations['name'].tolist()}")
     
     return df_routes, df_steps, df_segs, df_nodes
 
@@ -405,6 +408,42 @@ class MetroNetwork(Network):
         # TODO 获取地铁的发车时间间隔
         pass
 
+    def add_line(self, line:pd.Series, sleep_dt=0.2, debug=False):
+        def _add_line_name(df, name):
+            atts = list(df)
+            df = df.assign(name=name)
+            
+            return df[['name']+atts]
+        
+        def judge_ring(stations):
+            return stations.iloc[0].id == stations.iloc[-1].id
+        
+        logger.info(f"{line['name']}")
+        line_id = line['line_id']
+        line_name = line['line_name']
+
+        stations = query_dataframe(self.df_stations, 'line_id', line_id)
+        is_ring = judge_ring(stations)
+        if not is_ring:
+            df_routes, df_steps, _edges, _nodes = get_subway_segment_info(stations, strategy=2, sleep_dt=sleep_dt)
+        else:
+            # TODO
+            raise NotImplementedError
+        
+        # 获取发车时间间隔
+        time_gap = np.unique(df_steps.cost.astype(np.int64).values[:len(_edges)] - _edges.cost.astype(np.int64).values.cumsum())
+        assert len(time_gap) == 1, "可能存在大小区间"
+        self.lineid_2_waiting_time[line_id] = time_gap[0]
+        
+        assert (_edges.cost > 0).all()
+        
+        df_routes = _add_line_name(df_routes, line['name'])
+        _edges = _add_line_name(_edges, line['name'])
+        if debug:
+            df_steps.reset_index().to_excel(EXP_FOLDER / f"{line['name']}_steps.xlsx")
+            
+        return df_routes, _edges, _nodes
+            
     def add_all_lines(self, sleep_dt=0.2, debug=False):
         #! 地铁2号线, 地铁7号线(赤尾 出现两次, 因为 `福邻` 地铁站暂未开通)
         # 存在环线：地铁5号线, 识别尚未开通的车站
@@ -412,34 +451,13 @@ class MetroNetwork(Network):
         df_edges_lst = []
         df_nodes_lst = []
 
-        def _add_line_name(df, name):
-            atts = list(df)
-            df = df.assign(name=name)
-            
-            return df[['name']+atts]
 
         for i, line in self.df_lines.iterrows():
-            # i, line = next(lines_iter)
-            logger.info(f"{line['name']}")
-            line_id = line['line_id']
-            line_name = line['line_name']
-
-            stations = query_dataframe(self.df_stations, 'line_id', line_id)
-            df_routes, df_steps, _edges, _nodes = get_subway_segment_info(stations, strategy=2, sleep_dt=sleep_dt)
-            
-            # 获取发车时间间隔
-            time_gap = np.unique(df_steps.cost.astype(np.int64).values[:len(_edges)] - _edges.cost.astype(np.int64).values.cumsum())
-            assert len(time_gap) == 1, "可能存在大小区间"
-            self.lineid_2_waiting_time[line_id] = time_gap[0]
-            
-            assert (_edges.cost > 0).all()
-            
-            df_routes_lst.append(_add_line_name(df_routes, line['name']))
-            df_edges_lst.append(_add_line_name(_edges, line['name']))
+            df_routes, _edges, _nodes = self.add_line(line, sleep_dt)
+            df_routes_lst.append(df_routes)
+            df_edges_lst.append(_edges)
             df_nodes_lst.append(_nodes)
-            if debug:
-                df_steps.reset_index().to_excel(EXP_FOLDER / f"{line['name']}_steps.xlsx")
-
+            
         df_routes = pd.concat(df_routes_lst)
         df_edges = pd.concat(df_edges_lst)
         df_nodes = pd.concat(df_nodes_lst)
@@ -491,22 +509,19 @@ class MetroNetwork(Network):
         
         return df_nodes, df_edges
 
-""" 待开发 & 开发 """
-def check_shortest_path():
-    src = "440300024057010" # 11号线，南山
-    dst = "440300024057013" # 11号线，福田
-
-    routes = metro.top_k_paths(src, dst, 3, weight='cost')
-    nodes.loc[routes[0]]
 
 #%%
 if __name__ == "__main__":
-    line_fn = DATA_FOLDER / 'wgs/shenzhen_subway_lines_wgs.geojson'
-    ckpt = DATA_FOLDER / 'shenzhen_network.ckpt'
-    ckpt = None
+    city = "beijing"
+    line_fn = DATA_FOLDER / f'wgs/{city}_subway_lines_wgs.geojson'
+    ckpt = DATA_FOLDER / f'{city}_network.ckpt'
+    # ckpt = None
 
     metro = MetroNetwork(line_fn=line_fn, ckpt=ckpt)
-    metro.add_all_lines(sleep_dt=0)
+    line_ring = metro.df_lines.loc[6]
+    metro.add_line(line_ring)
+    
+    # metro.add_all_lines(sleep_dt=0)
     save_checkpoint(DIRECTION_MEMO, DIRECTION_MEMO_FN)
     
     self = metro

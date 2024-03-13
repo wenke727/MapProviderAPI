@@ -311,10 +311,14 @@ if __name__ == "__main__":
     pipeline_subway_data(folder="../data/subway/", round=2)
 
 #%%
-folder="../data/subway/"
+folder = "../data/subway/"
 folder = Path(folder)
 df_lines = get_national_subways(folder / "China_subways-240116.pkl", refresh=False, auto_save=True)
 
+# 输出统计指标
+cities = [val['cityname'] for key, val in df_lines.items()]
+lines = pd.concat([val['df'] for key, val in df_lines.items()])
+stations = pd.json_normalize(lines.st.explode())
 
 
 #%%

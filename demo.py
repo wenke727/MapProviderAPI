@@ -13,18 +13,17 @@ from shapely import LineString, MultiLineString
 
 from sklearn.metrics import classification_report
 
-from tilemap import plot_geodata
-from maptools.trajectory import Trajectory
-from maptools.geo.serialization import read_csv_to_geodataframe
 
 from mapmatching import ST_Matching
 from mapmatching.graph import GeoDigraph
 from mapmatching.geo.io import read_csv_to_geodataframe, to_geojson
 
+from maptools.trajectory import Trajectory
+from maptools.geo.linestring import merge_linestrings
+from maptools.geo.serialization import read_csv_to_geodataframe
 from maptools.utils.misc import set_chinese_font_style
 from maptools.utils.logger import make_logger, logger_dataframe
 from maptools.utils.serialization import save_fig
-from maptools.geo.linestring import merge_linestrings
 
 set_chinese_font_style()
 
@@ -33,9 +32,9 @@ set_chinese_font_style()
 UTM_CRS = None
 UPDATE_RADIUS = 800
 SIMPLIFY_TOLERANCE = 200
-ANGLE_LIMIT = 45
-SPEED_LIMIT = None
-DISTANCE_LIMIT = 0
+ANGLE_LIMIT = 60
+SPEED_LIMIT = 0
+DISTANCE_LIMIT = None
 DRIFT_ALPHA = 3
 
 SEARCH_RADIUS = 500
@@ -47,14 +46,8 @@ MATCH_DETAIL = False
 CELL_SERVICE_RADIUS = 200
 
 
-def _test_shortest_path(net, src, dst):
-    """ 最短路径测试 """
-    res = net.search(src, dst)
-    net.df_edges.loc[res['epath']].plot()
-
-    return res
-
-def _judge_not_subway(probs:dict, eps=.6):
+def _judge_subway_or_not(probs:dict, eps=.6):
+    """通过卡阈值的方式判断是否地铁出行"""
     if not probs:
         return False
     
@@ -62,25 +55,6 @@ def _judge_not_subway(probs:dict, eps=.6):
         if val < eps:
             return False
     return True
-
-def _plot_temporal_prob_dist(actual_duration, avg_duration, avg_waiting):
-    # 生成一系列的实际通行时间用于绘图
-    min_duration = avg_duration - avg_waiting
-    durations = np.linspace(min_duration*0.8, actual_duration * 1.2, 1000)
-    probabilities = [cal_temporal_prob(duration, avg_duration, min_duration) for duration in durations]
-
-    # 绘制概率图
-    plt.figure(figsize=(10, 6))
-    plt.plot(durations, probabilities, label="Probability")
-    plt.axvline(x=actual_duration, color='r', linestyle='--', label='Actual Duration')
-    plt.axvline(x=min_duration, color='g', linestyle='--', label='Min Duration')
-    plt.axvline(x=avg_duration, color='b', linestyle='--', label='Avg Duration')
-    plt.xlabel('Duration')
-    plt.ylabel('Probability')
-    plt.title('Probability of Actual Duration')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
 
 def cal_temporal_prob(actual_duration, avg_duration, avg_waiting, factor=2, bias=60):
     """
@@ -202,15 +176,15 @@ def trim_first_and_last_step(df_path, res, eps=TRIM_EDGE_RATIO, skip_exchange_li
     - The first and last steps are trimmed based on their comparison with `eps`.
     - If the first or last step is an 'exchange' or 'inner_link', it's further adjusted.
     - The function updates `res` with the new 'epath', 'step_0', and 'step_n' based on the trimming.
-    - It also processes the trimmed path data using `process_path_data` before returning.
+    - It also processes the trimmed path data using `combine_subway_edges` before returning.
     """
     df_path = df_edges.loc[res['epath']]
     if res['status'] != 0:
         return df_path
 
     logger.debug(f"step_0: {res['step_0']:.3f}, step_n: {res['step_n']:.3f}")
-    # determine_trim_indices
     start, end = 0, len(res['epath'])  - 1
+    # strat
     if res['step_0'] < eps:
         logger.debug(f"Change `step_0` to 0, for {res['step_0']:.3f} < {eps:.3f}")
         res['step_0'] = 0
@@ -218,7 +192,8 @@ def trim_first_and_last_step(df_path, res, eps=TRIM_EDGE_RATIO, skip_exchange_li
         logger.debug(f"Change `step_0` to 0, start += 1, for {res['step_0']:.3f} < {1 - eps:.3f}")
         res['step_0'] = 0
         start += 1
-        
+    
+    # end
     if res['step_n'] < eps:
         logger.debug(f"Change `step_n` to 1, end -= 1, for {res['step_n']:.3f} < {eps:.3f}")
         res['step_n'] = 1
@@ -227,6 +202,7 @@ def trim_first_and_last_step(df_path, res, eps=TRIM_EDGE_RATIO, skip_exchange_li
         logger.debug(f"Change `step_n` to 1, for {res['step_n']:.3f} > {1 - eps:.3f}")
         res['step_n'] = 1
 
+    # exchange link
     if skip_exchange_link:
         if df_path.iloc[start].dst_name in ['exchange',  'inner_link']:
             start += 1
@@ -239,11 +215,10 @@ def trim_first_and_last_step(df_path, res, eps=TRIM_EDGE_RATIO, skip_exchange_li
     if df_path.shape[0] > 1:
         df_path.iloc[0].duration *= res['step_0']
         df_path.iloc[-1].duration *= res['step_n']
-    df_combined_path = process_path_data(df_path)
     
-    return df_combined_path
+    return df_path
 
-def process_path_data(df):
+def combine_subway_edges(df):
     """
     Processes and aggregates path data from a DataFrame.
 
@@ -325,7 +300,7 @@ def load_mapmather():
     
     return matcher, net, df_edges, df_nodes
 
-def plot_helper(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None, x_label=None, legend=False):
+def plot_matching_result(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None, x_label=None, legend=False):
     fig, ax = matcher.plot_result(traj.points.to_crs(4326), res, legend=legend)
 
     # plot origin traj `points` and `segments`
@@ -380,20 +355,24 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
     traj = Trajectory(pts, traj_id=traj_id, utm_crs=UTM_CRS)
     res['traj'] = traj
     traj.preprocess(
-        radius=UPDATE_RADIUS, 
-        speed_limit=SPEED_LIMIT, dis_limit=DISTANCE_LIMIT, angle_limit=ANGLE_LIMIT, alpha=DRIFT_ALPHA, strict=False, 
-        tolerance=SIMPLIFY_TOLERANCE,
-        verbose=False, 
-        plot=False
+        radius = UPDATE_RADIUS, 
+        speed_limit = SPEED_LIMIT, 
+        dis_limit = DISTANCE_LIMIT, 
+        angle_limit = ANGLE_LIMIT, 
+        alpha = DRIFT_ALPHA, 
+        strict = False, 
+        tolerance = SIMPLIFY_TOLERANCE,
+        verbose = False, 
+        plot = False
     )
 
-    # step 2:map-matching
+    # step 2: map-matching
     match_res = matcher.matching(
         traj.points.to_crs(4326), 
         search_radius = SEARCH_RADIUS, 
         top_k = TOK_K_CANDIDATES,
         simplify = False,
-        tolerance=SIMPLIFY_TOLERANCE,
+        tolerance = SIMPLIFY_TOLERANCE,
         plot = False, 
         details = MATCH_DETAIL, 
         debug_in_levels = BEBUG_BY_LEVEL
@@ -404,7 +383,7 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
     if len(match_res.get('epath', [])) == 0:
         logger.warning(f"No candidates/轨迹点无法映射到候选边上, status: {match_res['status']}")
         if plot:
-            res['fig'], res['ax'] = plot_helper(traj, matcher, match_res, f"{title}")  
+            res['fig'], res['ax'] = plot_matching_result(traj, matcher, match_res, f"{title}")  
         res['df_path'] = pd.DataFrame()
 
         return res
@@ -412,6 +391,7 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
     # step 3: postprocess `df_path`
     df_path = traj.align_crs(df_edges.loc[match_res['epath']])
     df_path = trim_first_and_last_step(df_path, match_res)
+    df_path = combine_subway_edges(df_path)
     res['df_path'] = df_path.drop(columns=['dir', 'distance'])    
         
     # step 4: metric, 计算轨迹分数：时间、空间 以及 Cell
@@ -443,7 +423,7 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
                     f"{actual_duration/60:.1f} min"\
                     f" / [{(avg_duration - avg_waiting)/60:.1f}, {avg_duration/60:.1f}, "\
                     f"{(avg_duration + avg_waiting) / 60:.1f}]"
-        res['fig'], res['ax'] = plot_helper(traj, matcher, match_res, f"{title}, {trip_info}")
+        res['fig'], res['ax'] = plot_matching_result(traj, matcher, match_res, f"{title}, {trip_info}")
         if save_img:
             res['fig'].savefig(save_img, bbox_inches='tight', pad_inches=0.1, dpi=500)
             plt.close()
@@ -475,7 +455,7 @@ def exp(folder, out_folder=None, save_imgs=True, debug=False):
             path_lst.append(result['df_path'])
         
         # collect probs
-        label = _judge_not_subway(result['match_res'].get('probs', {'prob': 0}))
+        label = _judge_subway_or_not(result['match_res'].get('probs', {'prob': 0}))
         result['label'] = label
         info = {"fn": fn, "label": label, **result['match_res']['probs']}
         if 'step_0' in result['match_res']:
@@ -523,61 +503,56 @@ def exp(folder, out_folder=None, save_imgs=True, debug=False):
     for fn in fns:
         fn_name = Path(fn).name.split('.')[0]
         traj_id = int(fn_name)
-        # if traj_id != 185:
-        #     continue
         
         logger.info(f"processing: {fn}")
         pts = read_csv_to_geodataframe(fn)
 
-        # pipeline
         # try:
         result = pipeline(pts, traj_id=traj_id, plot=save_imgs, title=Path(fn).name)
         if 'match_res' not in result:
             result['match_res'] = {'probs': {'norm_prob': 0}}
         # except:
-            # logger.error(f"process {fn} failed")
+        #     logger.error(f"process {fn} failed")
 
         traj = result['traj']
         traj.raw_df.loc[:, 'traj_id'] = traj_id
 
         _collect_result(traj, result, raw_points_lst, points_lst, path_lst, matching_lst)
-        if save_imgs: _save_fig(result)
+        if save_imgs: 
+            _save_fig(result)
 
     _save_result(out_folder, raw_points_lst, points_lst, path_lst, matching_lst)
     
     return
 
-
+#%%
 if __name__ == '__main__':
+    """load map macther"""
     matcher, net, df_edges, df_nodes = load_mapmather()
     lineid_2_waitingtime = df_edges[['way_id', 'duration', 'dst_name']]\
                                    .query(" dst_name == 'inner_link' ")\
                                    .drop_duplicates()\
                                    .set_index('way_id').to_dict()['duration']
 
-    exp('./exp/12-08/0800/csv', './exp/12-08/0800/attempt_0202', save_imgs=True, debug=False)
+    #%%
+    """ 针对某一个文件夹统一处理 """
+    exp('./exp/12-08/0800/csv', './exp/12-08/0800/attempt_0313', save_imgs=True, debug=False)
 
-    # # folder = Path('./exp/12-06/0800/csv')
-    # folder = Path('./exp/12-08/0800/csv')
-    # fns = sorted(glob.glob(f"{folder}/*.csv"))
-    # num_2_fn = {int(fn.split('/')[-1].split('.')[0]):fn for fn in fns}
-    # traj_id = 174
-    # fn = num_2_fn[traj_id]
-    # # fn = fns[traj_id]
 
-    # fn = Path('./exp/badCase/29980.csv')
-    # fn = Path('./exp/badCase/305627.csv')
-    # fn = Path('./exp/badCase/301279.csv')
-    # fn = Path('./exp/badCase/268828.csv') # load failed!
-    # traj_id = int(fn.name.split('.')[0])
-    # pts = read_csv_to_geodataframe(fn)
-    # traj_res = pipeline(pts, traj_id=traj_id, title=Path(fn).name, save_img=False, plot=True)
+    #%%
+    """ 单条轨迹测试 """
+    fn = Path('./exp/demo/025.csv') # 公交 / 地铁
+    # fn = Path('./exp/badCase/305455.csv')
 
-    # traj = traj_res['traj']
-    # df_path = traj_res['df_path']
-    # if not df_path.empty:
-    #     logger_dataframe(df_path.drop(columns=['geometry']))
-    # res = traj_res['match_res']
+    traj_id = int(fn.name.split('.')[0])
+    pts = read_csv_to_geodataframe(fn)
+    traj_res = pipeline(pts, traj_id=traj_id, title=Path(fn).name, save_img=False, plot=True)
+
+    traj = traj_res['traj']
+    df_path = traj_res['df_path']
+    if not df_path.empty:
+        logger_dataframe(df_path.drop(columns=['geometry']))
+    res = traj_res['match_res']
 
 
 # %%
