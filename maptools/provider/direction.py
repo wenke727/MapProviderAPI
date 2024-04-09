@@ -145,6 +145,7 @@ def parse_transit_directions(data, mode='地铁线路', verbose=False):
 
     df_steps = df_steps.replace('', np.nan).dropna(axis=1, how='all')
     df_steps.rename(columns={'id': 'line_id'}, inplace=True)
+    df_steps.line_id = df_steps.line_id.astype(int)
     df_steps.loc[:, 'cost'] = df_steps.cost.apply(
         lambda x: x.get('duration', np.nan) if isinstance(x, dict) else x)
 
@@ -212,8 +213,8 @@ def filter_route_by_lineID(steps, src, dst):
     d = steps.iloc[-1].arrival_stop
     
     try:
-        src_line_id = src.line_id
-        dst_line_id = dst.line_id
+        src_line_id = int(src.line_id)
+        dst_line_id = int(dst.line_id)
         src_name = src['name']
         dst_name = dst['name']
         if src_line_id is None or dst_line_id is None:

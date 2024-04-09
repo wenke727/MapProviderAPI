@@ -75,9 +75,6 @@ def get_station_info(url, city):
     return df
 
 def postprocess(lst, city):
-
-
-
     df = pd.concat([i.rename(columns=ARR_2_KEY) for i in lst])
     df['站台形式'] = df['站台形式'].fillna('')
     df['敷设方式'] = df['敷设方式'].fillna('')

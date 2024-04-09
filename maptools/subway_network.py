@@ -147,7 +147,8 @@ def get_subway_segment_info(stations, strategy=0, citycode=CITYCODE, sleep_dt=.2
     unavailabel_stops = []
     def _query_helper(src, dst):
         routes, steps, walking_steps = get_subway_routes(src, dst, strategy, citycode, memo=DIRECTION_MEMO)
-        routes.query("stop_check == True", inplace=True)
+        if 'stop_check' in routes: 
+            routes.query("stop_check == True", inplace=True)
         if sleep_dt: 
             time.sleep(sleep_dt)
         

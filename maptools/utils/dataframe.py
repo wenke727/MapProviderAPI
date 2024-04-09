@@ -47,3 +47,35 @@ def reduce_mem_usage(df, verbose=True):
     print('Decreased by {:.1f}%'.format(100 * (start_mem - end_mem) / start_mem))
     return df
 
+def split_dataframe(df, n):
+    """
+    将 DataFrame 平均切分成 n 个子 DataFrame。
+    
+    参数:
+    - df: 要切分的原始 DataFrame。
+    - n: 要切分成的子 DataFrame 的数量。
+    
+    返回:
+    - 一个包含 n 个子 DataFrame 的列表。
+    """
+    # 计算每个子 DataFrame 的大概行数
+    chunk_size = int(np.ceil(len(df) / n))
+    
+    # 切分 DataFrame
+    return [df[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
+
+
+if __name__ == "__main":
+    # 示例使用
+    # 创建一个示例 DataFrame
+    df_example = pd.DataFrame({
+        'A': range(1, 11),
+        'B': range(11, 21)
+    })
+
+    # 将 DataFrame 平均切分成 3 个子 DataFrame
+    sub_dfs = split_dataframe(df_example, 3)
+
+    # 显示切分后的子 DataFrame
+    for i, sub_df in enumerate(sub_dfs):
+        print(f"子 DataFrame {i + 1}:\n{sub_df}\n")

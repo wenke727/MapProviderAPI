@@ -1,4 +1,5 @@
 import numpy as np
+from numba import njit
 from loguru import logger
 from geopandas import GeoDataFrame
 from shapely import LineString, Point
@@ -156,6 +157,24 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
     
     return data[~mask], df
 
+@njit
+def find_updates(xy, radius):
+    update_indices = [0]
+    last_update_x = xy[0, 0]
+    last_update_y = xy[0, 1]
+    
+    for i in range(1, xy.shape[0]):
+        dx = xy[i, 0] - last_update_x
+        dy = xy[i, 1] - last_update_y
+        distance = np.sqrt(dx**2 + dy**2)
+        
+        if distance >= radius:
+            update_indices.append(i)
+            last_update_x = xy[i, 0]
+            last_update_y = xy[i, 1]
+            
+    return np.array(update_indices)
+
 def filter_by_point_update_policy(gdf:GeoDataFrame, radius:float, keep_last=True):
     """
     Optimized point update policy for GeoDataFrame with projected coordinates.
@@ -178,27 +197,31 @@ def filter_by_point_update_policy(gdf:GeoDataFrame, radius:float, keep_last=True
     """
     
     gdf = gdf.sort_index()
-    update_indices = [gdf.index[0]]
-    last_update_index = gdf.index[0]
+    # last_update_index = gdf.index[0]
+    # update_indices = [last_update_index]
     
-    for idx, row in gdf.iterrows():
-        if idx == last_update_index:
-            continue
+    # for idx, row in gdf.iterrows():
+    #     if idx == last_update_index:
+    #         continue
 
-        distance = row.geometry.distance(gdf.at[last_update_index, 'geometry'])
-        if distance < radius:
-            continue
+    #     distance = row.geometry.distance(gdf.at[last_update_index, 'geometry'])
+    #     if distance < radius:
+    #         continue
         
-        # Record index if distance exceeds the threshold
-        last_update_index = idx
-        update_indices.append(idx)
+    #     # Record index if distance exceeds the threshold
+    #     last_update_index = idx
+    #     update_indices.append(idx)
+    
+    xy = np.array([(geom.x, geom.y) for geom in gdf.geometry])
+    update_indices = find_updates(xy, radius)
     
     # the last point
+    idx = len(gdf) - 1
     if keep_last and update_indices[-1] != idx:
         p_0 = gdf.iloc[update_indices[-1]].geometry
         p_1 = gdf.iloc[-1].geometry
         if not p_0.equals(p_1):
-            update_indices.append(idx)
+            update_indices = np.append(update_indices, idx)
         
     return gdf.loc[update_indices]
 

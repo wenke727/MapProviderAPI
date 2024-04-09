@@ -1,17 +1,13 @@
 #%%
-import os
 import glob
 import numpy as np
 import pandas as pd
-import seaborn as sns
-from copy import copy
 import geopandas as gpd
 from pathlib import Path
 from loguru import logger
 import matplotlib.pyplot as plt
-from shapely import LineString, MultiLineString
+from shapely import LineString
 
-from sklearn.metrics import classification_report
 
 
 from mapmatching import ST_Matching
@@ -28,7 +24,6 @@ from maptools.utils.serialization import save_fig
 set_chinese_font_style()
 
 
-#%%
 UTM_CRS = None
 UPDATE_RADIUS = 800
 SIMPLIFY_TOLERANCE = 200
@@ -46,7 +41,7 @@ MATCH_DETAIL = False
 CELL_SERVICE_RADIUS = 200
 
 
-def _judge_subway_or_not(probs:dict, eps=.6):
+def pred_subway_trip(probs:dict, eps=.6):
     """通过卡阈值的方式判断是否地铁出行"""
     if not probs:
         return False
@@ -133,6 +128,8 @@ def get_time_params(traj:Trajectory, df_path:gpd.GeoDataFrame, lineid_2_waitingt
     
     # calculate_actual_duration
     actual_duration = traj.raw_df.dt.max() - traj.raw_df.dt.min()
+    if df_path.empty:
+        return actual_duration, np.float('inf'), np.float('inf'), 0
     
     # calculate_waiting_time
     exchange_links = df_path.query("dst_name in ['exchange', 'inner_link']")
@@ -246,13 +243,12 @@ def combine_subway_edges(df):
         return df
     
     df = df.copy()
-    special_cases_mask = df['dst_name'].isin(['exchange', 'inner_link'])
-    
     # step id
     df.loc[:, 'order'] = range(df.shape[0])
     df['step'] = (df['way_id'] != df['way_id'].shift()).cumsum() - 1
     
     # Separate records where dst_name is 'exchange' or 'inner_link'
+    special_cases_mask = df['dst_name'].isin(['exchange', 'inner_link'])
     special_cases = df[special_cases_mask]
     regular_cases = df[~special_cases_mask]
 
@@ -350,7 +346,7 @@ def plot_matching_result(traj:Trajectory, matcher: ST_Matching, res:dict, title:
 def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=None, title=''):
     global lineid_2_waitingtime
     
-    res = {}
+    res = {'traj': None, 'match_res': None}
     # step 1: preprocess
     traj = Trajectory(pts, traj_id=traj_id, utm_crs=UTM_CRS)
     res['traj'] = traj
@@ -455,9 +451,9 @@ def exp(folder, out_folder=None, save_imgs=True, debug=False):
             path_lst.append(result['df_path'])
         
         # collect probs
-        label = _judge_subway_or_not(result['match_res'].get('probs', {'prob': 0}))
-        result['label'] = label
-        info = {"fn": fn, "label": label, **result['match_res']['probs']}
+        pred = pred_subway_trip(result['match_res'].get('probs', {'prob': 0}))
+        result['pred'] = pred
+        info = {"fn": fn, "pred": pred, **result['match_res']['probs']}
         if 'step_0' in result['match_res']:
             info['step_0'] = result['match_res']['step_0']
         if 'step_n' in result['match_res']:
@@ -469,7 +465,7 @@ def exp(folder, out_folder=None, save_imgs=True, debug=False):
 
     def _save_fig(result):
         # save img for debug
-        if result['label']:
+        if result['pred']:
             save_fig(result['fig'], sub_img_folder / f'{fn_name}.jpg')
         else:
             result['ax'].title.set_backgroundcolor('orange')
@@ -525,6 +521,7 @@ def exp(folder, out_folder=None, save_imgs=True, debug=False):
     
     return
 
+
 #%%
 if __name__ == '__main__':
     """load map macther"""
@@ -536,7 +533,7 @@ if __name__ == '__main__':
 
     #%%
     """ 针对某一个文件夹统一处理 """
-    exp('./exp/12-08/0800/csv', './exp/12-08/0800/attempt_0313', save_imgs=True, debug=False)
+    exp('./exp/12-08/0800/csv', './exp/12-08/0800/attempt_0409', save_imgs=True, debug=False)
 
 
     #%%

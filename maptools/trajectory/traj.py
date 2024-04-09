@@ -35,7 +35,7 @@ class Trajectory(BaseTrajectory):
             self.raw_df = convert_geom_to_utm_crs(self.raw_df, utm_crs)
 
         self.points = self.raw_df.copy()
-                
+
         self.traj_id_col = traj_id_col
         if traj_id_col not in self.points.columns:
             self.points.loc[:, traj_id_col] = traj_id
@@ -55,20 +55,20 @@ class Trajectory(BaseTrajectory):
         Clean drift in trajectory data by filtering out points based on speed, distance, 
         and angle thresholds.
         """
-   
+
         if verbose:
             ori_size = len(self.points)
-     
+
         self.points, mask = clean_drift_traj_points(
             self.points, col=[self.traj_id_col, 'dt', 'geometry'],
             method=method, speed_limit=speed_limit, dis_limit=dis_limit,
             angle_limit=angle_limit, alpha=alpha, strict=strict)
-        
+
         if verbose:
             # logger_dataframe(mask, desc="clean_drift_traj_points mask:")
             cur_size = len(self.points)
             logger.debug(f"Clean drift points {ori_size} -> {cur_size}, cut down {(ori_size - cur_size) / ori_size * 100:.1f}%")
-        
+
         return self.points
 
     def filter_by_point_update_policy(self, radius=500, verbose=False):
@@ -79,16 +79,16 @@ class Trajectory(BaseTrajectory):
         """
         if self.latlon:
             radius /= 110,000
-            
+
         if verbose:
             ori_size = len(self.points)
-     
+
         self.points = filter_by_point_update_policy(self.points, radius)
-     
+
         if verbose:
             cur_size = len(self.points)
             logger.debug(f"Filter points {ori_size} -> {cur_size}, cut down {(ori_size - cur_size) / ori_size * 100:.1f}%")
-        
+
         return self.points
 
     def simplify(self, tolerance=100, precision=6, verbose=False):
@@ -98,32 +98,37 @@ class Trajectory(BaseTrajectory):
         if verbose:
             cur_size = len(self.points)
             logger.debug(f"Simplify points {ori_size} -> {cur_size}, cut down {(ori_size - cur_size) / ori_size * 100:.1f}%")
-        
+
         return self.points
 
-    def preprocess(self, radius=500, 
-                   speed_limit=0, dis_limit=0, angle_limit=45, alpha=3, strict=False, 
-                   tolerance=None, 
-                   verbose=True, plot=True
-                   ):
+    def preprocess(
+        self,
+        radius=500,
+        speed_limit=0,
+        dis_limit=0,
+        angle_limit=45,
+        alpha=3,
+        strict=False,
+        tolerance=None,
+        verbose=True,
+        plot=True,
+    ):
         self.filter_by_point_update_policy(radius=radius, verbose=verbose)
         self.clean_drift_points(
-            speed_limit=speed_limit, 
-            dis_limit=dis_limit, 
-            angle_limit=angle_limit, 
-            alpha=alpha, 
-            strict=strict, 
-            verbose=verbose
+            speed_limit=speed_limit,
+            dis_limit=dis_limit,
+            angle_limit=angle_limit,
+            alpha=alpha,
+            strict=strict,
+            verbose=verbose,
         )
 
         if tolerance:
             self.points = self.simplify(tolerance, verbose=verbose)
-            # if plot:
-                # self.points.plot(marker='x', color='black', alpha=.9, zorder=9, ax=ax)
 
         if plot:
             fig, ax = self.plot_preprocess_result()
-        
+
     @property
     def crs(self):
         return f"EPSG:{self.points.crs.to_epsg()}"
@@ -131,14 +136,14 @@ class Trajectory(BaseTrajectory):
     @property
     def get_epsg(self):
         return self.crs.to_epsg()
-    
+
     def plot(self, *args, **kwargs):
         return self.points.plot(*args, **kwargs)
-    
+
     def get_points(self, latlon=True):
         if latlon:
             return convert_geom_to_wgs(self.points)
-        
+
         return self.points
 
     def plot_preprocess_result(self):
@@ -155,24 +160,24 @@ class Trajectory(BaseTrajectory):
         _pts = self.points.to_crs(4326)
         _pts.iloc[:-1].plot(color='b', ax=ax, facecolor='white', zorder=4, label='Keep')
         _pts.iloc[[-1]].plot(ax=ax, color='b', zorder=5, label='Dest')
-        
+
         ax.legend(loc='best')
-        
+
         return fig, ax
 
     def distance(self, other):
         # other = self.align_crs(other)
         return self.raw_df.distance(other)
-    
+
     def align_crs(self, gdf:gpd.GeoDataFrame):
         if gdf.crs == self.crs:
             return gdf
-        
+
         return gdf.to_crs(self.crs)
-        
+
     def to_file(self, fn, raw=False):
         df = self.points if not raw else self.raw_df
-        
+
         return to_geojson(df, fn)
 
 if __name__ == "__main__":
