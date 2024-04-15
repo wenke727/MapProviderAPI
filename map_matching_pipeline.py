@@ -7,16 +7,14 @@ from pathlib import Path
 from loguru import logger
 import matplotlib.pyplot as plt
 from shapely import LineString
-
-
+from geopandas import GeoDataFrame
 
 from mapmatching import ST_Matching
 from mapmatching.graph import GeoDigraph
-from mapmatching.geo.io import read_csv_to_geodataframe, to_geojson
 
 from maptools.trajectory import Trajectory
 from maptools.geo.linestring import merge_linestrings
-from maptools.geo.serialization import read_csv_to_geodataframe
+from maptools.geo.serialization import read_csv_to_geodataframe, csv_to_geodf, to_geojson
 from maptools.utils.misc import set_chinese_font_style
 from maptools.utils.logger import make_logger, logger_dataframe
 from maptools.utils.serialization import save_fig
@@ -41,6 +39,31 @@ MATCH_DETAIL = False
 CELL_SERVICE_RADIUS = 200
 
 
+def load_map_matcher():
+    global UTM_CRS
+    df_nodes = gpd.read_file('../MapTools/exp/shezhen_subway_nodes.geojson')
+    df_edges = gpd.read_file('../MapTools/exp/shezhen_subway_edges.geojson')
+
+    lineid_2_waitingtime = df_edges[['way_id', 'duration', 'dst_name']]\
+                                .query(" dst_name == 'inner_link' ")\
+                                .drop_duplicates()\
+                                .set_index('way_id').to_dict()['duration']
+
+    df_edges = df_edges.assign(
+        dist = df_edges['distance'],
+        geometry = df_edges.geometry.fillna(LineString())
+    )
+    
+    # FIXME
+    net = GeoDigraph(df_edges, df_nodes.set_index('nid'), weight='duration')
+    matcher = ST_Matching(net=net, ll=False, prob_thres=.0)
+    matcher.set_search_candidates_variables(top_k = TOK_K_CANDIDATES, search_radius = SEARCH_RADIUS)
+
+    UTM_CRS = matcher.get_utm_crs()
+    logger.warning(f"crs: {UTM_CRS}")
+        
+    return matcher, net, lineid_2_waitingtime
+
 def pred_subway_trip(probs:dict, eps=.6):
     """通过卡阈值的方式判断是否地铁出行"""
     if not probs:
@@ -50,6 +73,13 @@ def pred_subway_trip(probs:dict, eps=.6):
         if val < eps:
             return False
     return True
+
+def cal_cell_dis_prob(traj:GeoDataFrame, df_path:GeoDataFrame, dist_eps:int=CELL_SERVICE_RADIUS):
+    route = merge_linestrings(df_path.geometry)
+    dists = traj.distance(route)
+    cell_dis_prob = (dists < dist_eps).mean()
+    
+    return cell_dis_prob
 
 def cal_temporal_prob(actual_duration, avg_duration, avg_waiting, factor=2, bias=60):
     """
@@ -146,7 +176,7 @@ def get_time_params(traj:Trajectory, df_path:gpd.GeoDataFrame, lineid_2_waitingt
     
     return actual_duration, avg_duration, avg_waiting, temporal_prob
 
-def trim_first_and_last_step(df_path, res, eps=TRIM_EDGE_RATIO, skip_exchange_link=False):
+def trim_first_and_last_step(df_path, res, eps=TRIM_EDGE_RATIO, skip_exchange_link=False, verbose=False):
     """
     Trims the first and last steps of a path based on specified criteria.
 
@@ -175,28 +205,27 @@ def trim_first_and_last_step(df_path, res, eps=TRIM_EDGE_RATIO, skip_exchange_li
     - The function updates `res` with the new 'epath', 'step_0', and 'step_n' based on the trimming.
     - It also processes the trimmed path data using `combine_subway_edges` before returning.
     """
-    df_path = df_edges.loc[res['epath']]
     if res['status'] != 0:
         return df_path
 
-    logger.debug(f"step_0: {res['step_0']:.3f}, step_n: {res['step_n']:.3f}")
+    if verbose: logger.debug(f"step_0: {res['step_0']:.3f}, step_n: {res['step_n']:.3f}")
     start, end = 0, len(res['epath'])  - 1
     # strat
     if res['step_0'] < eps:
-        logger.debug(f"Change `step_0` to 0, for {res['step_0']:.3f} < {eps:.3f}")
+        if verbose: logger.debug(f"Change `step_0` to 0, for {res['step_0']:.3f} < {eps:.3f}")
         res['step_0'] = 0
     elif res['step_0'] > 1 - eps:
-        logger.debug(f"Change `step_0` to 0, start += 1, for {res['step_0']:.3f} < {1 - eps:.3f}")
+        if verbose: logger.debug(f"Change `step_0` to 0, start += 1, for {res['step_0']:.3f} < {1 - eps:.3f}")
         res['step_0'] = 0
         start += 1
     
     # end
     if res['step_n'] < eps:
-        logger.debug(f"Change `step_n` to 1, end -= 1, for {res['step_n']:.3f} < {eps:.3f}")
+        if verbose: logger.debug(f"Change `step_n` to 1, end -= 1, for {res['step_n']:.3f} < {eps:.3f}")
         res['step_n'] = 1
         end -= 1
     elif res['step_n'] > 1 - eps:
-        logger.debug(f"Change `step_n` to 1, for {res['step_n']:.3f} > {1 - eps:.3f}")
+        if verbose: logger.debug(f"Change `step_n` to 1, for {res['step_n']:.3f} > {1 - eps:.3f}")
         res['step_n'] = 1
 
     # exchange link
@@ -278,24 +307,6 @@ def combine_subway_edges(df):
 
     return gpd.GeoDataFrame(result)
 
-def load_mapmather():
-    global UTM_CRS
-    df_nodes = gpd.read_file('../MapTools/exp/shezhen_subway_nodes.geojson')
-    df_edges = gpd.read_file('../MapTools/exp/shezhen_subway_edges.geojson')
-
-    df_edges = df_edges.assign(
-        dist = df_edges['distance'],
-        geometry = df_edges.geometry.fillna(LineString())
-    )
-    
-    net = GeoDigraph(df_edges, df_nodes.set_index('nid'), weight='duration')
-    matcher = ST_Matching(net=net, ll=False, loc_deviaction=180, prob_thres=.0)
-    # FIXME 
-    UTM_CRS = matcher.utm_crs
-    logger.warning(f"crs: {UTM_CRS}")
-    
-    return matcher, net, df_edges, df_nodes
-
 def plot_matching_result(traj:Trajectory, matcher: ST_Matching, res:dict, title:str=None, x_label=None, legend=False):
     fig, ax = matcher.plot_result(traj.points.to_crs(4326), res, legend=legend)
 
@@ -313,10 +324,9 @@ def plot_matching_result(traj:Trajectory, matcher: ST_Matching, res:dict, title:
 
     # plot od name
     if 'epath' in res:
-        net = matcher.net
-        src_idx = net.get_edge(res['epath'][0], 'src')
-        dst_idx = net.get_edge(res['epath'][-1], 'dst')
-        od = net.get_node([src_idx, dst_idx]).to_crs(4326)
+        src_idx = matcher.get_edges(res['epath'][0], 'src')
+        dst_idx = matcher.get_edges(res['epath'][-1], 'dst')
+        od = matcher.get_nodes([src_idx, dst_idx]).to_crs(4326)
         xmin, xmax, ymin, ymax = ax.axis()
         delta_y = (ymax - ymin) / 50
         for _, p in od.iterrows():
@@ -325,31 +335,24 @@ def plot_matching_result(traj:Trajectory, matcher: ST_Matching, res:dict, title:
             if xmin > x or x > xmax or ymin > y or y > ymax:
                 continue
             ax.text(
-                x, y, p['name'], 
-                transform=ax.transData,
-                bbox=dict(
-                    facecolor='white', 
-                    alpha=0.4, 
-                    edgecolor='none', 
-                    boxstyle="round,pad=0.5"),
-                va='bottom', 
-                ha='center',
+                x, y, p['name'], va='bottom', ha='center', transform=ax.transData,
+                bbox=dict(facecolor='white', alpha=0.4, edgecolor='none', boxstyle="round,pad=0.5"),
             )
 
     if title:
         ax.set_title(title)
+    
     if x_label:
         ax.set_xlabel(x_label)
         
     return fig, ax
 
-def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=None, title=''):
+def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=None, title='', verbose=False):
     global lineid_2_waitingtime
-    
-    res = {'traj': None, 'match_res': None}
+
     # step 1: preprocess
     traj = Trajectory(pts, traj_id=traj_id, utm_crs=UTM_CRS)
-    res['traj'] = traj
+    res = {'traj': traj, 'match_res': {}}
     traj.preprocess(
         radius = UPDATE_RADIUS, 
         speed_limit = SPEED_LIMIT, 
@@ -364,17 +367,15 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
 
     # step 2: map-matching
     match_res = matcher.matching(
-        traj.points.to_crs(4326), 
-        search_radius = SEARCH_RADIUS, 
-        top_k = TOK_K_CANDIDATES,
+        traj.points,
         simplify = False,
         tolerance = SIMPLIFY_TOLERANCE,
         plot = False, 
         details = MATCH_DETAIL, 
         debug_in_levels = BEBUG_BY_LEVEL
     )
-    res['match_res'] = match_res
-    logger.debug(match_res)
+    res['match_res'] = match_res 
+    if verbose: logger.debug(match_res)
 
     if len(match_res.get('epath', [])) == 0:
         logger.warning(f"No candidates/轨迹点无法映射到候选边上, status: {match_res['status']}")
@@ -385,25 +386,19 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
         return res
 
     # step 3: postprocess `df_path`
-    df_path = traj.align_crs(df_edges.loc[match_res['epath']])
+    df_path = matcher.get_edges(match_res['epath'])
+    df_path = traj.align_crs(df_path)
     df_path = trim_first_and_last_step(df_path, match_res)
     df_path = combine_subway_edges(df_path)
     res['df_path'] = df_path.drop(columns=['dir', 'distance'])    
         
     # step 4: metric, 计算轨迹分数：时间、空间 以及 Cell
-    route = merge_linestrings(df_path.geometry)
-    dists = traj.distance(route)
-    cell_dis_prob = (dists < dist_eps).mean()
-    match_res['probs'] = {**match_res['probs'], 'cell_dis_prob': cell_dis_prob} # **dist_dict
+    cell_dis_prob = cal_cell_dis_prob(traj.raw_df, df_path, dist_eps)
 
     # step 4.2: travel time probs
     actual_duration, avg_duration, avg_waiting,  temporal_prob = get_time_params(traj, df_path, lineid_2_waitingtime)
-    res['temporal'] = {
-        'actual_duration': actual_duration,
-        'avg_duration': avg_duration, 
-        'avg_waiting': avg_waiting
-    }
-    match_res['probs']['temporal_prob'] = temporal_prob
+    res['temporal'] = {'actual_duration': actual_duration, 'avg_duration': avg_duration, 'avg_waiting': avg_waiting}
+    match_res['probs'] = {**match_res['probs'], 'cell_dis_prob': cell_dis_prob, 'temporal_prob': temporal_prob} # **dist_dict
     for p in ['trans_prob', 'prob']:
         if p in match_res['probs']:
             del match_res['probs'][p]
@@ -463,14 +458,16 @@ def exp(folder, out_folder=None, save_imgs=True, debug=False):
         logger.debug(info)
         matching_lst.append(info)
 
-    def _save_fig(result):
+    def _save_fig(result, sep=True):
         # save img for debug
-        if result['pred']:
-            save_fig(result['fig'], sub_img_folder / f'{fn_name}.jpg')
+        if sep:
+            if result['pred']:
+                save_fig(result['fig'], sub_img_folder / f'{fn_name}.jpg')
+            else:
+                result['ax'].title.set_backgroundcolor('orange')
+                save_fig(result['fig'], no_sub_img_folder / f'{fn_name}.jpg')
         else:
-            result['ax'].title.set_backgroundcolor('orange')
-            save_fig(result['fig'], no_sub_img_folder / f'{fn_name}.jpg')
-        save_fig(result['fig'], img_folder / f'{fn_name}.jpg')
+            save_fig(result['fig'], img_folder / f'{fn_name}.jpg')
         plt.close()
         pass
 
@@ -524,17 +521,8 @@ def exp(folder, out_folder=None, save_imgs=True, debug=False):
 
 #%%
 if __name__ == '__main__':
-    """load map macther"""
-    matcher, net, df_edges, df_nodes = load_mapmather()
-    lineid_2_waitingtime = df_edges[['way_id', 'duration', 'dst_name']]\
-                                   .query(" dst_name == 'inner_link' ")\
-                                   .drop_duplicates()\
-                                   .set_index('way_id').to_dict()['duration']
-
-    #%%
-    """ 针对某一个文件夹统一处理 """
-    exp('./exp/12-08/0800/csv', './exp/12-08/0800/attempt_0409', save_imgs=True, debug=False)
-
+    """ load map macther """
+    matcher, net, lineid_2_waitingtime = load_map_matcher()
 
     #%%
     """ 单条轨迹测试 """
@@ -550,6 +538,19 @@ if __name__ == '__main__':
     if not df_path.empty:
         logger_dataframe(df_path.drop(columns=['geometry']))
     res = traj_res['match_res']
+    res
+
+    # %%
+    trajs = csv_to_geodf('./data/trajs/sample.csv')
+    
+    traj_id = 0
+    pts = trajs.query("traj_id == @traj_id")
+    pts.reset_index(drop=True, inplace=True)
+    traj_res = pipeline(pts, traj_id=traj_id, title=traj_id, save_img=False, plot=True)
 
 
+    #%%
+    """ 针对某一个文件夹统一处理 """
+    # exp('./exp/12-08/0800/csv', './exp/12-08/0800/attempt_0410', save_imgs=True, debug=False)
+    
 # %%
