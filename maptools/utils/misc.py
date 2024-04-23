@@ -73,7 +73,7 @@ def set_chinese_font_style():
         plt.rcParams['font.sans-serif'] = ['SimHei']
     # Set font for Linux
     elif system_name == 'Linux':
-        plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+        plt.rcParams['font.sans-serif'] = ['SimHei']
     # Set font for Mac
     elif system_name == 'Darwin':  # Darwin is the name of macOS's underlying system
         plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']

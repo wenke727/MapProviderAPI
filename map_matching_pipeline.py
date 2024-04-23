@@ -1,4 +1,5 @@
 #%%
+import os
 import glob
 import numpy as np
 import pandas as pd
@@ -14,27 +15,28 @@ from mapmatching.graph import GeoDigraph
 
 from maptools.trajectory import Trajectory
 from maptools.geo.linestring import merge_linestrings
-from maptools.geo.serialization import read_csv_to_geodataframe, csv_to_geodf, to_geojson
+
+# local debug
 from maptools.utils.misc import set_chinese_font_style
 from maptools.utils.logger import make_logger, logger_dataframe
+from maptools.geo.serialization import read_csv_to_geodataframe, csv_to_geodf, to_geojson, load_folder_to_gdf
 from maptools.utils.serialization import save_fig
+
 
 set_chinese_font_style()
 
 
 UTM_CRS = None
 UPDATE_RADIUS = 800
-SIMPLIFY_TOLERANCE = 200
+SIMPLIFY_TOLERANCE = 250
 ANGLE_LIMIT = 60
 SPEED_LIMIT = 0
 DISTANCE_LIMIT = None
 DRIFT_ALPHA = 3
 
 SEARCH_RADIUS = 500
-TOK_K_CANDIDATES = 10
+TOK_K_CANDIDATES = 8
 TRIM_EDGE_RATIO = 0.15
-BEBUG_BY_LEVEL = False
-MATCH_DETAIL = False
 
 CELL_SERVICE_RADIUS = 200
 
@@ -62,7 +64,7 @@ def load_map_matcher():
     UTM_CRS = matcher.get_utm_crs()
     logger.warning(f"crs: {UTM_CRS}")
         
-    return matcher, net, lineid_2_waitingtime
+    return matcher, lineid_2_waitingtime
 
 def pred_subway_trip(probs:dict, eps=.6):
     """通过卡阈值的方式判断是否地铁出行"""
@@ -81,7 +83,7 @@ def cal_cell_dis_prob(traj:GeoDataFrame, df_path:GeoDataFrame, dist_eps:int=CELL
     
     return cell_dis_prob
 
-def cal_temporal_prob(actual_duration, avg_duration, avg_waiting, factor=2, bias=60):
+def cal_temporal_prob(actual_duration, avg_duration, avg_waiting, factor=2, bias=60, verbose=False):
     """
     Calculate the probability of a given actual subway transit time based on a normal distribution.
 
@@ -120,12 +122,13 @@ def cal_temporal_prob(actual_duration, avg_duration, avg_waiting, factor=2, bias
         sigma += bias
     
     prob = np.exp(-((actual_duration - avg_duration) ** 2) / (sigma ** 2))
-    logger.debug(f"Prob({actual_duration/60:.1f} | {avg_duration/60:.1f}, "
-                 f"{avg_waiting/60:.0f}, {bias/60:.0f}) = {prob*100:.1f}%")
+    if verbose:
+        logger.debug(f"Prob({actual_duration/60:.1f} | {avg_duration/60:.1f}, "
+                     f"{avg_waiting/60:.0f}, {bias/60:.0f}) = {prob*100:.1f}%")
     
     return prob
 
-def get_time_params(traj:Trajectory, df_path:gpd.GeoDataFrame, lineid_2_waitingtime:dict):
+def get_time_values(traj:Trajectory, df_path:gpd.GeoDataFrame, lineid_2_waitingtime:dict):
     """
     Calculate various time parameters and the temporal probability for a given subway trajectory.
 
@@ -155,23 +158,21 @@ def get_time_params(traj:Trajectory, df_path:gpd.GeoDataFrame, lineid_2_waitingt
     Example:
     >>> get_time_params(traj, df_path, lineid_2_waitingtime)
     """
-    
-    # calculate_actual_duration
-    actual_duration = traj.raw_df.dt.max() - traj.raw_df.dt.min()
     if df_path.empty:
         return actual_duration, np.float('inf'), np.float('inf'), 0
+    
+    actual_duration = traj.get_duration()
     
     # calculate_waiting_time
     exchange_links = df_path.query("dst_name in ['exchange', 'inner_link']")
     waiting_time = exchange_links.duration.sum() - exchange_links.walking_duration.sum()
-    first_watiting_time = lineid_2_waitingtime[df_path.iloc[0].way_id]
+    first_watiting_time = lineid_2_waitingtime.get(df_path.iloc[0].way_id, 180)
 
     _sum = df_path.duration.sum()
     avg_duration = _sum + first_watiting_time
     avg_waiting = waiting_time + first_watiting_time
 
     waiting_penalty = 120 * (1 + exchange_links.shape[0])
-    logger.debug(f"waiting_penalty: {waiting_penalty}")
     temporal_prob = cal_temporal_prob(actual_duration, avg_duration, avg_waiting, bias=waiting_penalty)
     
     return actual_duration, avg_duration, avg_waiting, temporal_prob
@@ -282,7 +283,7 @@ def combine_subway_edges(df):
     regular_cases = df[~special_cases_mask]
 
     # Group by eid and aggregate
-    grouped = regular_cases.groupby(['way_id', 'step']).agg({
+    agg_dict = {
         'src': 'first',
         'dst': 'last',
         'src_name': 'first',
@@ -294,7 +295,8 @@ def combine_subway_edges(df):
         'speed': 'mean',
         'geometry': merge_linestrings,
         'order': 'first',
-    }).reset_index()
+    }
+    grouped = regular_cases.groupby(['way_id', 'step']).agg(agg_dict).reset_index()
 
     # Handle missing values in walking_duration
     grouped['walking_duration'] = grouped['walking_duration'].replace({0: np.nan})
@@ -348,10 +350,10 @@ def plot_matching_result(traj:Trajectory, matcher: ST_Matching, res:dict, title:
     return fig, ax
 
 def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=None, title='', verbose=False):
-    global lineid_2_waitingtime
+    global lineid_2_waitingtime, matcher
 
     # step 1: preprocess
-    traj = Trajectory(pts, traj_id=traj_id, utm_crs=UTM_CRS)
+    traj = Trajectory(pts, traj_id=traj_id, traj_id_col='traj_id', utm_crs=UTM_CRS, t='dt')
     res = {'traj': traj, 'match_res': {}}
     traj.preprocess(
         radius = UPDATE_RADIUS, 
@@ -359,26 +361,19 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
         dis_limit = DISTANCE_LIMIT, 
         angle_limit = ANGLE_LIMIT, 
         alpha = DRIFT_ALPHA, 
-        strict = False, 
         tolerance = SIMPLIFY_TOLERANCE,
+        strict = False, 
         verbose = False, 
         plot = False
     )
 
     # step 2: map-matching
-    match_res = matcher.matching(
-        traj.points,
-        simplify = False,
-        tolerance = SIMPLIFY_TOLERANCE,
-        plot = False, 
-        details = MATCH_DETAIL, 
-        debug_in_levels = BEBUG_BY_LEVEL
-    )
+    match_res = matcher.matching(traj.points, simplify = False)
     res['match_res'] = match_res 
     if verbose: logger.debug(match_res)
 
     if len(match_res.get('epath', [])) == 0:
-        logger.warning(f"No candidates/轨迹点无法映射到候选边上, status: {match_res['status']}")
+        if verbose: logger.warning(f"No candidates/轨迹点无法映射到候选边上, status: {match_res['status']}")
         if plot:
             res['fig'], res['ax'] = plot_matching_result(traj, matcher, match_res, f"{title}")  
         res['df_path'] = pd.DataFrame()
@@ -396,14 +391,14 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
     cell_dis_prob = cal_cell_dis_prob(traj.raw_df, df_path, dist_eps)
 
     # step 4.2: travel time probs
-    actual_duration, avg_duration, avg_waiting,  temporal_prob = get_time_params(traj, df_path, lineid_2_waitingtime)
+    actual_duration, avg_duration, avg_waiting,  temporal_prob = get_time_values(traj, df_path, lineid_2_waitingtime)
     res['temporal'] = {'actual_duration': actual_duration, 'avg_duration': avg_duration, 'avg_waiting': avg_waiting}
     match_res['probs'] = {**match_res['probs'], 'cell_dis_prob': cell_dis_prob, 'temporal_prob': temporal_prob} # **dist_dict
     for p in ['trans_prob', 'prob']:
         if p in match_res['probs']:
             del match_res['probs'][p]
     
-    if plot:
+    if plot and not df_path.empty:
         start = df_path.iloc[0].src_name
         end = df_path.iloc[-1].dst_name
         try:
@@ -421,10 +416,9 @@ def pipeline(pts, traj_id, dist_eps=CELL_SERVICE_RADIUS, plot=False, save_img=No
     
     return res
 
-def exp(folder, out_folder=None, save_imgs=True, debug=False):
+def exp(trajs, out_folder=None, save_imgs=True, debug=False):
     global logger
     logger = make_logger(out_folder, 'log', console=True, include_timestamp=False)
-    folder = Path(folder)
     out_folder = Path(out_folder)
     
     def _create_folder(folder):
@@ -448,7 +442,7 @@ def exp(folder, out_folder=None, save_imgs=True, debug=False):
         # collect probs
         pred = pred_subway_trip(result['match_res'].get('probs', {'prob': 0}))
         result['pred'] = pred
-        info = {"fn": fn, "pred": pred, **result['match_res']['probs']}
+        info = {"traj_id": traj_id, "pred": pred, **result['match_res']['probs']}
         if 'step_0' in result['match_res']:
             info['step_0'] = result['match_res']['step_0']
         if 'step_n' in result['match_res']:
@@ -491,17 +485,13 @@ def exp(folder, out_folder=None, save_imgs=True, debug=False):
     points_lst = []
     matching_lst = []
     raw_points_lst = []
-    fns = sorted(glob.glob(f"{folder}/*.csv"))
-    if debug: fns = fns[:5]
-    for fn in fns:
-        fn_name = Path(fn).name.split('.')[0]
-        traj_id = int(fn_name)
-        
-        logger.info(f"processing: {fn}")
-        pts = read_csv_to_geodataframe(fn)
+    
+    for traj_id, pts in trajs.groupby('traj_id'):
+        fn_name = traj_id
+        pts.reset_index(drop=True, inplace=True)
 
         # try:
-        result = pipeline(pts, traj_id=traj_id, plot=save_imgs, title=Path(fn).name)
+        result = pipeline(pts, traj_id=traj_id, plot=save_imgs, title=f"traj_id: {traj_id}")
         if 'match_res' not in result:
             result['match_res'] = {'probs': {'norm_prob': 0}}
         # except:
@@ -522,35 +512,35 @@ def exp(folder, out_folder=None, save_imgs=True, debug=False):
 #%%
 if __name__ == '__main__':
     """ load map macther """
-    matcher, net, lineid_2_waitingtime = load_map_matcher()
+    matcher, lineid_2_waitingtime = load_map_matcher()
+
+    #%%
+    trajs = csv_to_geodf('./data/trajs/sample.csv')
+    # trajs = csv_to_geodf('./data/trajs/1249.csv')
+    exp(trajs, out_folder='./debug', save_imgs=True)
+    
+    #%%
+    """ 单条轨迹测试 """
+    traj_id = 0
+    pts = trajs.query("traj_id == @traj_id")
+    pts.reset_index(drop=True, inplace=True)
+    traj_res = pipeline(pts, traj_id=traj_id, title=traj_id, save_img=None, plot=True)
 
     #%%
     """ 单条轨迹测试 """
     fn = Path('./exp/demo/025.csv') # 公交 / 地铁
-    # fn = Path('./exp/badCase/305455.csv')
 
     traj_id = int(fn.name.split('.')[0])
     pts = read_csv_to_geodataframe(fn)
     traj_res = pipeline(pts, traj_id=traj_id, title=Path(fn).name, save_img=False, plot=True)
-
-    traj = traj_res['traj']
-    df_path = traj_res['df_path']
-    if not df_path.empty:
-        logger_dataframe(df_path.drop(columns=['geometry']))
-    res = traj_res['match_res']
-    res
-
-    # %%
-    trajs = csv_to_geodf('./data/trajs/sample.csv')
-    
-    traj_id = 0
-    pts = trajs.query("traj_id == @traj_id")
-    pts.reset_index(drop=True, inplace=True)
-    traj_res = pipeline(pts, traj_id=traj_id, title=traj_id, save_img=False, plot=True)
+    traj_res['match_res']
 
 
     #%%
     """ 针对某一个文件夹统一处理 """
-    # exp('./exp/12-08/0800/csv', './exp/12-08/0800/attempt_0410', save_imgs=True, debug=False)
+    folder = './exp/12-08/0800/csv'
+    trajs = load_folder_to_gdf(folder)
+    exp(trajs, './debug/attempt_0422', save_imgs=True, debug=False)
     
+
 # %%

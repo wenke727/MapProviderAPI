@@ -5,7 +5,6 @@ from geopandas import GeoDataFrame
 from shapely import LineString, Point
 
 from ..geo.geo_utils import convert_geom_to_utm_crs
-from ..geo.serialization import read_csv_to_geodataframe
 
 TRAJ_ID_COL = 'tid'
 
@@ -54,7 +53,7 @@ def get_outliers_thred_by_iqr(series, alpha=3):
 
 def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometry'],
                      method='twoside', speed_limit=None, dis_limit=None,
-                     angle_limit=30, alpha=1, strict=False):
+                     angle_limit=30, alpha=1, strict=False, verbose=False):
     """
     Clean drift in trajectory data by filtering out points based on speed, distance, 
     and angle thresholds.
@@ -123,9 +122,10 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
     # speed limit
     speed_mask = False
     if speed_limit is not None:
-        if speed_limit == 0:
+        if speed_limit <= 0:
             _, speed_limit = get_outliers_thred_by_iqr(df['speed_pre'], alpha)
-            logger.debug(f"Speed limit: {speed_limit:.2f} m/s")
+            if verbose: 
+                logger.debug(f"Speed limit: {speed_limit:.2f} m/s")
         
         if method == 'oneside':
             speed_mask = df['speed_pre'] > speed_limit
@@ -137,9 +137,10 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
     # distance limit
     dis_mask = False
     if dis_limit is not None:
-        if dis_limit == 0:
+        if dis_limit <= 0:
             _, dis_limit = get_outliers_thred_by_iqr(df['dis_pre'], alpha)
-            logger.debug(f"Distance limit: {dis_limit:.2f} m")
+            if verbose: 
+                logger.debug(f"Distance limit: {dis_limit:.2f} m")
         if method == 'oneside':
             dis_mask = df['dis_pre'] > dis_limit
         elif method == 'twoside':
@@ -152,7 +153,8 @@ def clean_drift_traj_points(data: GeoDataFrame, col=[TRAJ_ID_COL, 'dt', 'geometr
     if angle_limit is not None:
         df['angle'] = 180 - calculate_angle_between_sides(df['dis_pre'], df['dis_next'], df['dis_prenext'])
         angle_mask = (df['angle'] > angle_limit).fillna(False)
-        # logger.debug(f"\nAngels: {list(np.round(df['angle'].values, 0))}, \nmask: {list(angle_mask)}")
+        if verbose: 
+            logger.debug(f"\nAngels: {list(np.round(df['angle'].values, 0))}, \nmask: {list(angle_mask)}")
     mask = (traj_mask & (speed_mask | dis_mask | angle_mask))
     
     return data[~mask], df
@@ -266,6 +268,7 @@ def simplify_traj_points(gdf, tolerance, precision=6):
 
 
 if __name__ == "__main__":
+    from ..geo.serialization import read_csv_to_geodataframe
     traj = read_csv_to_geodataframe('./data/cells/004.csv')
     _records = clean_drift_traj_points(traj)
     _records

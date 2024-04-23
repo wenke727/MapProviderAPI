@@ -1,3 +1,5 @@
+import os
+import glob
 import pandas as pd
 import geopandas as gpd
 from shapely import wkt
@@ -54,6 +56,15 @@ def csv_to_geodf(filepath, longitude='longitude', latitude='latitude', crs=4326,
         
     return gdf
 
+def load_folder_to_gdf(folder):
+    res = []
+    for fn in sorted(glob.glob(f"{folder}/*.csv")):
+        df = read_csv_to_geodataframe(fn)[['dt', 'geometry']]
+        df['traj_id'] = os.path.basename(fn).split('.')[0]
+        res.append(df)
+    trajs = gpd.GeoDataFrame(pd.concat(res), crs=4326)
+    
+    return trajs
 
 if __name__ == "__main__":
     # Usage Example:

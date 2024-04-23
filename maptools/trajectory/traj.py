@@ -18,13 +18,14 @@ TRAJ_ID_COL = "tid"
 
 class Trajectory(BaseTrajectory):
     def __init__(self, df:gpd.GeoDataFrame, traj_id:int, traj_id_col=TRAJ_ID_COL, obj_id=None, 
-                 t=None, x=None, y=None, geometry='geometry', duration='dt', utm_crs=None, parent=None,
+                 x=None, y=None, t='dt', time_unit=1, geometry='geometry', utm_crs=None, parent=None,
                  latlon=False):
         assert not (x is None and y is None) or geometry is not None, "Check Coordination"
         self.raw_df = df
         self.latlon = latlon
         self.utm_crs = utm_crs
-        self.duraion_col = duration
+        self.time_col = t
+        self.time_unit = time_unit
         if self.latlon is False:
             self.raw_df = convert_geom_to_utm_crs(self.raw_df, utm_crs)
 
@@ -58,9 +59,9 @@ class Trajectory(BaseTrajectory):
             ori_size = len(self.points)
 
         self.points, mask = clean_drift_traj_points(
-            self.points, col = [self.traj_id_col, self.duraion_col, 'geometry'],
+            self.points, col = [self.traj_id_col, self.time_col, 'geometry'],
             method = method, speed_limit = speed_limit, dis_limit = dis_limit,
-            angle_limit = angle_limit, alpha = alpha, strict = strict)
+            angle_limit = angle_limit, alpha = alpha, strict = strict, verbose = verbose)
 
         if verbose:
             # logger_dataframe(mask, desc="clean_drift_traj_points mask:")
@@ -108,8 +109,8 @@ class Trajectory(BaseTrajectory):
         alpha=3,
         strict=False,
         tolerance=None,
-        verbose=True,
-        plot=True,
+        verbose=False,
+        plot=False,
     ):
         self.filter_by_point_update_policy(radius=radius, verbose=verbose)
         self.clean_drift_points(
@@ -181,6 +182,10 @@ class Trajectory(BaseTrajectory):
     def size(self):
         return self.raw_df.shape[0]
     
+    def get_duration(self):
+        ts  = self.raw_df[self.time_col]
+        return (ts.max() - ts.min()) / self.time_unit
+
 
 if __name__ == "__main__":
     idx = 0
