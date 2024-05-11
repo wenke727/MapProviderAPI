@@ -2,6 +2,7 @@ tmp/
 exp/
 data/
 debug/
+# cases/
 joblib_cache/
 cache/
 .DS_Store

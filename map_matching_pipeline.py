@@ -37,7 +37,6 @@ DRIFT_ALPHA = 3
 SEARCH_RADIUS = 500
 TOK_K_CANDIDATES = 8
 TRIM_EDGE_RATIO = 0.15
-
 CELL_SERVICE_RADIUS = 200
 
 
@@ -517,7 +516,7 @@ if __name__ == '__main__':
     #%%
     trajs = csv_to_geodf('./data/trajs/sample.csv')
     # trajs = csv_to_geodf('./data/trajs/1249.csv')
-    exp(trajs, out_folder='./debug', save_imgs=True)
+    exp(trajs, out_folder='./debug/0423', save_imgs=True)
     
     #%%
     """ 单条轨迹测试 """

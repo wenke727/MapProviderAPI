@@ -1,21 +1,19 @@
 #%%
 import time
+import shapely
 import numpy as np
 import pandas as pd
-import networkx as nx
-import geopandas as gpd
 from loguru import logger
-import shapely
-from shapely.geometry import MultiPoint, LineString
 from collections import defaultdict
+import geopandas as gpd
+from shapely.geometry import LineString
 
-from cfg import KEY, DATA_FOLDER, ROUTE_COLUMNS, EXP_FOLDER
+from cfg import DATA_FOLDER, EXP_FOLDER
 from geo.network import Network
 from geo.coords_utils import str_to_point
 from provider.direction import get_subway_routes
 from utils.logger import make_logger
 from utils.dataframe import query_dataframe
-from utils.dataframe import filter_dataframe_columns
 from utils.serialization import load_checkpoint, save_checkpoint, to_geojson
 
 DIRECTION_MEMO = {}
@@ -33,55 +31,6 @@ logger = make_logger(DATA_FOLDER, 'network', include_timestamp=False)
 #%%
 
 """ 辅助函数 """
-def _split_subway_line_name(series):
-    """
-    Splits a pandas Series containing metro line data into three parts: Line Name, Alias, and Direction.
-
-    Parameters:
-    - series (pd.Series): A pandas Series containing strings in the format 'Line Name(Alias)(Direction)' or 'Line Name(Direction)'.
-
-    Returns:
-    - pd.DataFrame: A DataFrame with columns 'Line Name', 'Alias', 'Direction'.
-    """
-    split_data = series.str.extract(r'(.*?)(?:\((.*?)\))?\((.*?)\)')
-    split_data.columns = ['line_name', 'alias', 'direction']
-
-    return split_data
-
-def _load_subway_lines(line_fn):
-    df_lines = gpd.read_file(line_fn).rename(columns={'id': 'line_id'})
-    if "status" in list(df_lines):
-        df_lines.status = df_lines.status.astype(np.int64)
-        unavailabel_line = df_lines.query("status != 1").name.unique().tolist()
-        logger.warning(f"Unavailabel lines: {unavailabel_line}")
-        df_lines.query('status == 1', inplace=True)
-
-    names = _split_subway_line_name(df_lines.name)
-    df_lines = pd.concat([names, df_lines], axis=1)
-    
-    return df_lines
-
-def _extract_stations_from_lines(df_lines, keep_attrs = ['line_id', 'line_name']):
-    stations = df_lines.busstops.apply(eval).explode()
-    df_stations = pd.json_normalize(stations)
-    df_stations.index = stations.index
-
-    df_stations = df_stations.merge(
-        df_lines[keep_attrs], 
-        left_index=True, right_index=True, how='left'
-    )
-
-    return df_stations.reset_index(drop=True)
-
-def _get_exchange_station_names(df_stations):
-    """ get the name list of exhange stations. """
-    tmp = df_stations.groupby('name')\
-            .agg({'id': 'count', 'line_id': list, 'location': np.unique})\
-            .query("id > 2")\
-            .reset_index().rename(columns={'id': 'num'})
-    tmp.loc[:, 'link'] = tmp.location.apply(lambda x: len(x) > 1)
-    
-    return tmp.sort_values(['num', 'link'], ascending=False)
 
 def split_linestring_by_stations(line_id, df_lines, df_stations):
     """split subway linestring into segments."""
@@ -372,12 +321,19 @@ class MetroNetwork(Network):
         self.visited_lines = set([])
 
         # lines
-        self.df_lines = _load_subway_lines(line_fn)
-        self.df_stations = _extract_stations_from_lines(self.df_lines)
+        self.df_lines = self._load_subway_lines(line_fn)
+        self.df_stations = self._extract_stations_from_lines(self.df_lines)
         self.lineid_2_waiting_time = {}
 
-    def get_exchange_stations(self):
-        return _get_exchange_station_names(self.df_stations)
+    def get_exchange_stations(self, df_stations):
+        """ get the name list of exhange stations. """
+        tmp = df_stations.groupby('name')\
+                .agg({'id': 'count', 'line_id': list, 'location': np.unique})\
+                .query("id > 2")\
+                .reset_index().rename(columns={'id': 'num'})
+        tmp.loc[:, 'link'] = tmp.location.apply(lambda x: len(x) > 1)
+        
+        return tmp.sort_values(['num', 'link'], ascending=False)
 
     def get_adj_nodes(self, nid, type='same_line'):
         assert type in ['same_line', 'exchange', None]
@@ -424,6 +380,7 @@ class MetroNetwork(Network):
         line_name = line['line_name']
 
         stations = query_dataframe(self.df_stations, 'line_id', line_id)
+        stations.to_csv(f"./tests/cases/{line_id}-{line_name}.csv")
         is_ring = judge_ring(stations)
         if not is_ring:
             df_routes, df_steps, _edges, _nodes = get_subway_segment_info(stations, strategy=2, sleep_dt=sleep_dt)
@@ -510,16 +467,57 @@ class MetroNetwork(Network):
         
         return df_nodes, df_edges
 
+    def _split_subway_line_name(self, series):
+        """
+        Splits a pandas Series containing metro line data into three parts: Line Name, Alias, and Direction.
+
+        Parameters:
+        - series (pd.Series): A pandas Series containing strings in the format 'Line Name(Alias)(Direction)' or 'Line Name(Direction)'.
+
+        Returns:
+        - pd.DataFrame: A DataFrame with columns 'Line Name', 'Alias', 'Direction'.
+        """
+        split_data = series.str.extract(r'(.*?)(?:\((.*?)\))?\((.*?)\)')
+        split_data.columns = ['line_name', 'alias', 'direction']
+
+        return split_data
+
+    def _load_subway_lines(self, line_fn):
+        df_lines = gpd.read_file(line_fn).rename(columns={'id': 'line_id'})
+        if "status" in list(df_lines):
+            df_lines.status = df_lines.status.astype(np.int64)
+            unavailabel_line = df_lines.query("status != 1").name.unique().tolist()
+            logger.warning(f"Unavailabel lines: {unavailabel_line}")
+            df_lines.query('status == 1', inplace=True)
+
+        names = self._split_subway_line_name(df_lines.name)
+        df_lines = pd.concat([names, df_lines], axis=1)
+        
+        return df_lines
+
+    def _extract_stations_from_lines(self, df_lines, keep_attrs = ['line_id', 'line_name']):
+        stations = df_lines.busstops.apply(eval).explode()
+        df_stations = pd.json_normalize(stations)
+        df_stations.index = stations.index
+
+        df_stations = df_stations.merge(
+            df_lines[keep_attrs], 
+            left_index=True, right_index=True, how='left'
+        )
+
+        return df_stations.reset_index(drop=True)
+
 
 #%%
 if __name__ == "__main__":
     city = "beijing"
+    city = "shenzhen"
     line_fn = DATA_FOLDER / f'wgs/{city}_subway_lines_wgs.geojson'
     ckpt = DATA_FOLDER / f'{city}_network.ckpt'
     # ckpt = None
 
     metro = MetroNetwork(line_fn=line_fn, ckpt=ckpt)
-    line_ring = metro.df_lines.loc[6]
+    line_ring = metro.df_lines.loc[16]
     metro.add_line(line_ring)
     
     # metro.add_all_lines(sleep_dt=0)
